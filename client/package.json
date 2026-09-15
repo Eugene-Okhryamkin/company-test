@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "size": "node scripts/check-bundle-size.mjs dist 200",
     "lint": "oxlint",
     "preview": "vite preview",
     "typecheck": "tsc -b",

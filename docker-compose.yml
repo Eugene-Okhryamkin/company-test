@@ -12,6 +12,11 @@ services:
       LIVE_UPDATE_INTERVAL_MS: ${LIVE_UPDATE_INTERVAL_MS:-3000}
       LIVE_UPDATE_MAX_NODES: ${LIVE_UPDATE_MAX_NODES:-3}
       LIVE_HEARTBEAT_INTERVAL_MS: ${LIVE_HEARTBEAT_INTERVAL_MS:-15000}
+      # AI search (optional): without a key the client falls back to text search.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-luna}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      AI_SEARCH_TIMEOUT_MS: ${AI_SEARCH_TIMEOUT_MS:-15000}
     ports:
       - "${BACKEND_PORT:-8080}:8080"
     init: true

@@ -14,6 +14,14 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # Compress text responses: static bundle and proxied API JSON.
+    gzip on;
+    gzip_comp_level 6;
+    gzip_min_length 256;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_types text/plain text/css text/javascript application/javascript application/json image/svg+xml application/manifest+json;
+
     # Live updates: long-lived WebSocket to the backend.
     location = /api/live {
         proxy_pass ${API_UPSTREAM};
@@ -33,6 +41,8 @@ server {
     location /api/ {
         proxy_pass ${API_UPSTREAM};
         proxy_connect_timeout 5s;
+        # AI search waits for the LLM (backend timeout AI_SEARCH_TIMEOUT_MS, 15 s by default).
+        proxy_read_timeout 30s;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;

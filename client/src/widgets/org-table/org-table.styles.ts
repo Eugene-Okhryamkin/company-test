@@ -9,21 +9,6 @@ export const Toolbar = styled.div`
   margin-bottom: 12px;
 `
 
-export const SearchInput = styled.input`
-  flex: 1 1 240px;
-  max-width: 360px;
-  padding: 6px 10px;
-  border: 1px solid ${({ theme }) => theme.colors.border};
-  border-radius: ${({ theme }) => theme.radii.sm};
-  font: inherit;
-  color: inherit;
-  background: ${({ theme }) => theme.colors.surface};
-
-  &::placeholder {
-    color: ${({ theme }) => theme.colors.textMuted};
-  }
-`
-
 export const Count = styled.span`
   color: ${({ theme }) => theme.colors.textMuted};
   font-variant-numeric: tabular-nums;

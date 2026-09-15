@@ -1,16 +1,18 @@
 # Архитектура
 
-> Документ дополняется по мере реализации этапов. Сейчас описаны **backend**, **client** (этапы 01 FOUNDATION, 02 CORE, 03 POLISH) и **запуск через Docker Compose**. Модель данных и алгоритм агрегации — в [`data-model.md`](data-model.md). Нетривиальные решения вынесены в [ADR](adr/).
+> Документ дополняется по мере реализации этапов. Описаны **backend**, **client** (этапы 01 FOUNDATION, 02 CORE, 03 POLISH, 04 BONUS), **production-сборка** (nginx, gzip, бюджет бандла), **AI-поиск**, **запуск через Docker Compose** и **Makefile**. REST-контракт — в [`backend/docs/openapi.yml`](../backend/docs/openapi.yml). Модель данных и алгоритм агрегации — в [`data-model.md`](data-model.md). Нетривиальные решения вынесены в [ADR](adr/).
 
 ## Обзор
 
 ```
 repo/
 ├── backend/             # Express 5 + TypeScript, mock API
+│   └── docs/openapi.yml # OpenAPI 3.1 спецификация REST API
 ├── client/              # Vite + React + TypeScript, SPA
-├── docs/
+├── docs/                # architecture, data-model, ADR, задание
 ├── docker-compose.yml   # запуск всего приложения одной командой
-└── .env.example         # порты на хосте
+├── Makefile             # build/test/start/stop
+└── .env.example         # порты, live-обновления, OpenAI
 ```
 
 ```mermaid
@@ -20,6 +22,7 @@ flowchart LR
         N["client<br/>nginx:stable-alpine<br/>статика SPA"] -->|"/api/* → http://backend:8080"| A["backend<br/>node:22-alpine<br/>Express :8080"]
     end
     B -.->|":8080 (BACKEND_PORT), для отладки"| A
+    A -->|"POST /v1/responses (AI-поиск, если задан OPENAI_API_KEY)"| O["OpenAI API"]
 ```
 
 Браузер обращается к одному origin (`:5173`). Nginx в контейнере `client` отдаёт собранную SPA и проксирует `/api/*` в контейнер `backend` по внутренней сети Compose. Поэтому CORS не нужен, а клиент ходит на относительный путь `/api/...` одинаково в dev и в production.
@@ -140,18 +143,26 @@ backend/
 ├── src/
 │   ├── index.ts                         # bootstrap: контейнер → app → listen, graceful shutdown
 │   ├── app.ts                           # createApp(container)
-│   ├── config.ts                        # PORT / HOST / NODE_ENV / LIVE_*
+│   ├── config.ts                        # PORT / HOST / NODE_ENV / LIVE_* / OPENAI_*
 │   ├── di/
 │   │   └── container.ts                 # Cradle, createAppContainer()
 │   ├── routes/
 │   │   ├── index.ts                     # /api router
-│   │   └── org-tree.routes.ts           # GET /api/org-tree
+│   │   ├── org-tree.routes.ts           # GET /api/org-tree
+│   │   └── search.routes.ts             # GET /api/search/status, POST /api/search/interpret (express.json 8kb)
 │   ├── controllers/
-│   │   └── org-tree.controller.ts       # OrgTreeController
+│   │   ├── org-tree.controller.ts       # OrgTreeController
+│   │   └── search.controller.ts         # SearchController: ошибки сервиса → 400 / 502 / 503
+│   ├── clients/
+│   │   └── openai-responses.client.ts   # LlmClient (порт) + OpenAiResponsesClient (Responses API, Structured Outputs)
 │   ├── services/
 │   │   ├── org-tree.service.ts          # OrgTreeService: getSnapshot / getVersion / applyChanges
 │   │   ├── org-tree.validator.ts        # правила целостности дерева
-│   │   └── live-update-simulator.ts     # mock-источник изменений (setInterval)
+│   │   ├── live-update-simulator.ts     # mock-источник изменений (setInterval)
+│   │   ├── ai-search.service.ts         # AiSearchService: запрос → LLM → валидированный SearchFilter
+│   │   ├── ai-search.prompt.ts          # системные инструкции для LLM
+│   │   ├── search-filter.json-schema.ts # JSON Schema фильтра (strict)
+│   │   └── search-filter.validator.ts   # parseSearchFilter: защитная валидация и нормализация ответа
 │   ├── events/
 │   │   └── org-tree-change-bus.ts       # pub/sub: сервис → транспорты
 │   ├── gateways/
@@ -160,7 +171,8 @@ backend/
 │   │   └── org-node.repository.ts       # интерфейс + InMemoryOrgNodeRepository
 │   ├── models/
 │   │   ├── org-node.model.ts            # OrgNode
-│   │   └── org-tree-patch.model.ts      # OrgNodeChange, OrgTreePatch
+│   │   ├── org-tree-patch.model.ts      # OrgNodeChange, OrgTreePatch
+│   │   └── search-filter.model.ts       # SearchFilter
 │   ├── dto/
 │   │   ├── org-node.dto.ts              # OrgNodeDto
 │   │   └── live-message.dto.ts          # LiveMessageDto (hello | patch | heartbeat)
@@ -175,8 +187,11 @@ backend/
 │   ├── helpers/
 │   │   ├── org-node.factory.ts          # makeNode()
 │   │   └── test-app.ts                  # createTestApp(overrides) на реальном контейнере
-│   ├── unit/                            # config, di, controllers, services, repositories, mappers, middlewares, seeds
-│   └── integration/                     # HTTP (supertest) и WebSocket (ws-клиент на реальном сервере)
+│   ├── unit/                            # config, di, clients, controllers, services, repositories, mappers, middlewares, seeds
+│   ├── integration/                     # HTTP (supertest) и WebSocket (ws-клиент на реальном сервере)
+│   └── contract/                        # ответы реального приложения ↔ docs/openapi.yml (ajv)
+├── docs/
+│   └── openapi.yml                      # OpenAPI 3.1
 ├── Dockerfile
 ├── vitest.config.ts
 ├── tsconfig.json                        # сборка (только src), paths @/*
@@ -290,6 +305,24 @@ sequenceDiagram
 
 Заголовки ответа: `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-cache`, `ETag: W/"…"`, `X-Data-Version: <n>` — версия данных для выравнивания с live-патчами.
 
+#### `GET /api/search/status`
+
+`{"aiEnabled": boolean}` — задан ли `OPENAI_API_KEY`. Клиент по нему решает, показывать ли кнопку «AI-поиск». `Cache-Control: no-store`.
+
+#### `POST /api/search/interpret`
+
+Тело `{"query": "топ-3 команды по бюджету"}` (≤ 300 символов после trim, тело ≤ 8 КБ). Ответ `{"filter": SearchFilter}` — контракт в [`data-model.md`, раздел 6](data-model.md#6-ai-фильтр-поиска).
+
+| Статус | Когда | Тело |
+|---|---|---|
+| `200` | Фильтр получен и прошёл валидацию | `{"filter": {...}}` |
+| `400` | Нет `query`, пустая строка, не строка, длиннее 300 символов, битый JSON | `{"error": "..."}` |
+| `413` | Тело больше 8 КБ | `{"error":"Payload Too Large"}` |
+| `502` | LLM недоступна: сеть, таймаут, HTTP-ошибка, отказ модели, ответ не по схеме | `{"error":"AI search failed"}`, без деталей |
+| `503` | AI-поиск не настроен (нет ключа) | `{"error":"AI search is not configured"}` |
+
+Полная спецификация всех эндпоинтов, включая WebSocket-сообщения, — [`backend/docs/openapi.yml`](../backend/docs/openapi.yml). Контрактные тесты (`tests/contract/openapi.contract.test.ts`) проверяют через ajv, что реальные ответы приложения и примеры в спецификации соответствуют её схемам, и что каждый описанный путь существует.
+
 #### `WS /api/live`
 
 Live-обновления: `hello` при подключении, `patch` на каждое изменение, `heartbeat` по таймеру. Контракт — в [`data-model.md`, раздел 4](data-model.md#4-websocket-патч-live-обновления).
@@ -323,6 +356,8 @@ Live-обновления: `hello` при подключении, `patch` на �
 
 - Express 5 сам передаёт отклонённые промисы из async-обработчиков в `errorHandler`, так что `try/catch` в контроллерах не нужен.
 - `errorHandler` пишет ошибку в лог, отвечает `500` с общим сообщением и не раскрывает внутренние детали. Если заголовки уже отправлены, в ответ ничего не пишет.
+- Клиентские ошибки middleware Express (`status` 4xx и `expose: true`, например битый JSON или слишком большое тело от `express.json`) отдаются со своим статусом и стандартным текстом (`Bad Request`, `Payload Too Large`) и не логируются как сбой.
+- Ожидаемые ошибки AI-поиска контроллер переводит в `400`/`502`/`503`; всё остальное пробрасывается в `errorHandler`.
 - `notFound` отвечает JSON 404 на всё, что не совпало ни с одним маршрутом.
 
 ### Конфигурация
@@ -336,6 +371,10 @@ Live-обновления: `hello` при подключении, `patch` на �
 | `LIVE_UPDATE_INTERVAL_MS` | `3000` | Период изменений, минимум 250 мс |
 | `LIVE_UPDATE_MAX_NODES` | `3` | Максимум узлов, меняющихся за такт (минимум 1) |
 | `LIVE_HEARTBEAT_INTERVAL_MS` | `15000` | Период ping и heartbeat-сообщений |
+| `OPENAI_API_KEY` | не задан | Ключ OpenAI. Пусто → AI-поиск выключен (`aiEnabled: false`, `503`), клиент работает как текстовый поиск |
+| `OPENAI_MODEL` | `gpt-5.6-luna` | Модель для Structured Outputs |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Базовый URL Responses API (прокси или совместимый шлюз) |
+| `AI_SEARCH_TIMEOUT_MS` | `15000` | Таймаут одного запроса к LLM, минимум 1000 |
 
 Конфиг регистрируется в DI-контейнере как значение `config`.
 
@@ -360,8 +399,13 @@ Live-обновления: `hello` при подключении, `patch` на �
 | Integration | `tests/integration/live-updates.gateway.test.ts` | Реальный HTTP-сервер + ws-клиенты: `hello` с версией, рассылка патча всем, heartbeat с версией, отключение клиента без pong, 404 на другой путь, `close()` (идемпотентно), ошибки сокета, отправка только открытым |
 | Integration | `tests/integration/org-tree.api.test.ts` | 200/JSON/форма, `[]`, ETag + 304, `X-Data-Version` и его рост после `applyChanges`, смена ETag при смене данных, 500 при сбое внедрённого сервиса, 404 на запись |
 | Integration | `tests/integration/app.test.ts` | 404 JSON, health-check отсутствует, нет `X-Powered-By` |
+| Unit | `tests/unit/clients/openai-responses.client.test.ts` | Без ключа запрос не уходит; форма запроса (`text.format: json_schema, strict`, `store: false`, Bearer, таймаут); base URL; разбор `output[].content[].output_text` и `output_text`; сеть, таймаут, HTTP-статус без утечки тела, отказ модели, битый JSON, `incomplete` |
+| Unit | `tests/unit/services/search-filter.validator.test.ts` | Полный фильтр, пустой фильтр, trim имени, уровни (дубли, порядок, неизвестные), перевёрнутый диапазон, клэмп 0–100, отрицательные значения, сортировка, `limit` |
+| Unit | `tests/unit/services/ai-search.service.test.ts` | Валидация запроса до вызова LLM, передача схемы и инструкций, 503-сценарий без ключа, обёртка сбоев LLM и невалидного ответа, проброс неожиданных ошибок; JSON Schema совместима со strict mode и совпадает с моделью |
+| Integration | `tests/integration/search.api.test.ts` | `status`, `200` с фильтром, `400` (нет тела / пусто / не строка / битый JSON), `413`, `503`, `502` без утечки деталей, `no-store` |
+| Contract | `tests/contract/openapi.contract.test.ts` | Спецификация — OpenAPI 3.1, схемы компилируются, примеры валидны, описанные пути существуют; реальные ответы всех эндпоинтов и live-сообщения соответствуют схемам |
 
-Покрытие: **100%** строк, 99,6% statements, 96,8% веток (непокрыты гонки при отправке в закрывающийся сокет). Из подсчёта исключены `src/index.ts` (bootstrap процесса), `src/models` и `src/dto` (только типы).
+Покрытие: 99,7% строк, 98,8% statements, 94,5% веток (непокрыты гонки при отправке в закрывающийся сокет и защитные ветки разбора ответа OpenAI). Из подсчёта исключены `src/index.ts` (bootstrap процесса), `src/models` и `src/dto` (только типы).
 
 ### Команды
 
@@ -393,6 +437,35 @@ docker run -d --name staff-pulse-backend -p 8080:8080 staff-pulse-backend
 ```
 
 `EXPOSE` только документирует порт. Чтобы сервер был доступен с хоста, нужен `-p 8080:8080`.
+
+### AI-поиск
+
+Решение и альтернативы — [ADR-006](adr/006-ai-search-structured-filter.md). Коротко:
+
+```mermaid
+sequenceDiagram
+    participant UI as Client (SmartSearchBar)
+    participant C as SearchController
+    participant S as AiSearchService
+    participant L as OpenAiResponsesClient
+    participant O as OpenAI Responses API
+    UI->>C: POST /api/search/interpret {query}
+    C->>S: interpret(query)
+    S->>S: trim, 1..300 символов
+    S->>L: generateStructured(instructions, input, SEARCH_FILTER_JSON_SCHEMA)
+    L->>O: POST /v1/responses (text.format json_schema, strict, store=false)
+    O-->>L: output[].content[].output_text (JSON)
+    L-->>S: unknown
+    S->>S: parseSearchFilter → SearchFilter
+    S-->>C: filter
+    C-->>UI: 200 {filter}
+    Note over UI: фильтр применяется к строкам таблицы на клиенте
+```
+
+- **LLM только переводит запрос в фильтр.** Данные в модель не отправляются, фильтрация выполняется на клиенте над теми же строками таблицы, поэтому live-патчи сразу отражаются в отфильтрованной выборке.
+- **Порт `LlmClient`** отделяет бизнес-логику от провайдера: сервис знает только `isConfigured()` и `generateStructured()`. Транспорт (`fetchFn`) внедряется через DI, в тестах подменяется.
+- **Двойная защита контракта:** strict JSON Schema на стороне OpenAI и `parseSearchFilter` на backend (типы, допустимые значения, нормализация: пустое имя → `null`, `min > max` → обмен, эффективность в 0–100). На клиенте ответ ещё раз проверяется zod-схемой.
+- **Ключ только на сервере** (`OPENAI_API_KEY` в `.env`), в браузер не попадает.
 
 ### Точки расширения
 
@@ -431,7 +504,7 @@ app  →  widgets  →  features  →  entities  →  shared
 |---|---|---|
 | **app** | `src/app/` | Точка сборки: провайдеры (тема, глобальные стили, `QueryClientProvider`), единый `queryClient`, каркас страницы |
 | **widgets** | `src/widgets/` | Готовые блоки интерфейса. `org-dashboard` — состояния данных, раскладка (split-view или переключатель) и общее выделение. `org-tree` — дерево. `org-table` — аналитическая таблица с сортировкой и фильтром |
-| **features** | `src/features/live-updates/` | Пользовательская возможность «данные обновляются в реальном времени»: `LiveUpdatesProvider` (сокет → кэш), статус соединения (`useLiveStatus`), `ConnectionIndicator` |
+| **features** | `src/features/live-updates/`, `src/features/ai-search/` | «Данные обновляются в реальном времени»: `LiveUpdatesProvider` (сокет → кэш), статус соединения (`useLiveStatus`), `ConnectionIndicator`. «Поиск на естественном языке»: API и zod-контракт фильтра, `applySearchFilter`, `describeSearchFilter`, хук `useSmartSearch`, `SmartSearchBar` |
 | **entities** | `src/entities/org-node/` | Предметная сущность «узел оргструктуры»: схема (`model`), запрос и хуки (`api`), построение дерева, агрегация, модель и её инкрементальное обновление (`lib`), live-сообщения, версия данных и применение патча (`live`), `PerformanceIndicator` (`ui`) |
 | **shared** | `src/shared/` | Код без привязки к предметной области: HTTP-клиент, ошибки и фабрика `QueryClient` (`api`), форматирование, дебаунс, media query, backoff и `ReconnectingSocket` (`lib`), тема (`styles`), базовые компоненты, включая `FlashOnChange` и `Collapse` (`ui`) |
 
@@ -455,13 +528,19 @@ client/src/
 │       ├── org-table.tsx              # role="grid"; сортировка, фильтр, выбор, клавиатура (roving tabindex), подсветка
 │       ├── org-table.styles.ts
 │       └── lib/
-│           ├── sort-rows.ts           # sortRows, applySortToggle
 │           └── filter-rows.ts         # filterRowsByName (регистр, ё ≡ е)
 ├── features/live-updates/
 │   ├── live-updates-provider.tsx      # сокет → applyOrgTreePatch / resync; статус в контекст
 │   ├── live-url.ts                    # ws(s)://origin/api/live, HEARTBEAT_TIMEOUT_FACTOR
 │   ├── live-status-context.ts, use-live-status.ts
 │   └── ui/connection-indicator.tsx    # «Онлайн» / «Нет связи · повтор через N с» + «Переподключиться»
+├── features/ai-search/
+│   ├── model/search-filter.schema.ts  # zod: SearchFilter, ответы status / interpret, EMPTY_SEARCH_FILTER
+│   ├── model/use-smart-search.ts      # текстовый режим ↔ AI-фильтр, отбрасывание устаревших ответов, fallback
+│   ├── api/ai-search.api.ts           # fetchAiSearchStatus, interpretSearchQuery, useAiSearchStatusQuery, useInterpretSearchMutation
+│   ├── lib/apply-search-filter.ts     # фильтр → строки таблицы (условия, top-N по сортировке фильтра)
+│   ├── lib/describe-search-filter.ts  # фильтр → «чипы» на русском
+│   └── ui/smart-search-bar.tsx        # role="search": поле, кнопка «AI-поиск», чипы, «Сбросить», уведомление
 ├── entities/org-node/
 │   ├── model/org-node.schema.ts       # zod-схема ответа + тип OrgNode
 │   ├── model/performance.ts           # пороги и уровни эффективности
@@ -469,6 +548,7 @@ client/src/
 │   ├── lib/aggregate-org-tree.ts      # агрегаты поддеревьев, O(n), без рекурсии
 │   ├── lib/org-tree-model.ts          # forest + byId + stats + rows; getOrgTreeModel (WeakMap-мемо), peek/prime
 │   ├── lib/update-org-tree-model.ts   # инкрементальный пересчёт пути «узел → корень»
+│   ├── lib/sort-rows.ts               # sortRows, applySortToggle (общие для таблицы и AI-фильтра)
 │   ├── live/live-message.schema.ts    # zod: hello | heartbeat | patch
 │   ├── live/data-version.ts           # версия snapshot по ссылке на массив данных
 │   ├── live/apply-org-tree-patch.ts   # patch → кэш TanStack: applied | ignored | resync
@@ -477,7 +557,7 @@ client/src/
 │   └── ui/performance-indicator.tsx
 ├── shared/
 │   ├── api/                           # http-client, get-error-message, query-client
-│   ├── lib/                           # format, use-debounced-value, use-media-query, prefers-reduced-motion
+│   ├── lib/                           # format, normalize-search-text, use-debounced-value, use-media-query, prefers-reduced-motion
 │   ├── lib/live/                      # backoff, reconnecting-socket
 │   ├── styles/                        # theme, GlobalStyle, типизация DefaultTheme
 │   └── ui/                            # LoadingState, ErrorState, EmptyState, Button, Panel, FlashOnChange, Collapse
@@ -636,10 +716,10 @@ sequenceDiagram
 | Клавиатура: заголовки | Нативные кнопки: Enter и Space работают как клик (сортировка, повторно — обратный порядок). `aria-sort` на `<th>` |
 | Клавиатура: данные | Roving tabindex — в таблице одна точка Tab (ячейка). ↑/↓ — строки, ←/→ — ячейки (в пределах таблицы), Home/End — первая / последняя строка в том же столбце, Enter — выбрать узел (выделяется в дереве). Порядок — видимый (после сортировки и фильтра). Клик по ячейке переносит позицию, узел, выбранный в дереве, становится точкой Tab без переноса фокуса, при отфильтрованной активной строке — первая строка. `preventDefault` не даёт странице прокручиваться; `scroll-margin-top` держит ячейку под sticky-заголовком |
 | Live-обновления | Изменившиеся значения подсвечиваются и гаснут за 1,5 с (`FlashOnChange`) |
-| Фильтр по названию | Поиск в реальном времени с дебаунсом **250 мс** (`useDebouncedValue`); подстрока без учёта регистра, ё ≡ е; работает вместе с сортировкой; счётчик «Показано N из M» (`aria-live`); сообщение, если ничего не найдено |
+| Поиск | Одно поле, два режима (`useSmartSearch`). **Текстовый:** при вводе — фильтр по названию с дебаунсом **250 мс**, подстрока без учёта регистра, ё ≡ е. **AI:** Enter или кнопка «AI-поиск» (видна, если `aiEnabled`) отправляет запрос на `/api/search/interpret`; полученный `SearchFilter` применяется к строкам (`applySearchFilter`), его сортировка становится сортировкой таблицы, понятые условия показываются чипами с кнопкой «Сбросить». Любое редактирование запроса возвращает текстовый режим; ответ на устаревший запрос отбрасывается; повторный Enter по уже применённому запросу не шлёт запрос. **Fallback:** при ошибке (502/503, сеть, ответ не по схеме) остаётся текстовый поиск и показывается «AI-поиск недоступен — показаны результаты поиска по названию». Счётчик «Показано N из M» (`aria-live`); сообщение, если ничего не найдено |
 | Клик по строке | `onSelect(id)` → узел выделяется в дереве; строка подсвечивается (`aria-selected`). Если узел выбран в дереве, строка прокручивается в зону видимости (`scrollIntoView({ block: 'nearest' })`) |
 | Форматы | Бюджет: `12 345 678 руб.` (обычные пробелы между разрядами); сотрудники: `1 234`; эффективность: один знак после запятой, `63,5`, плюс цветной индикатор |
-| Производительность | `useMemo(sortRows(filterRowsByName(rows, query), sort))`; строки — `memo`-компонент `TableRow`. Замер в браузере на 44 строках: от клика до обновления DOM 1–3 мс |
+| Производительность | `useMemo(sortRows(aiFilter ? applySearchFilter(rows, filter) : filterRowsByName(rows, query), sort))`; строки — `memo`-компонент `TableRow`. Замер в браузере на 44 строках: от клика до обновления DOM 1–3 мс |
 
 
 ### Стили
@@ -671,9 +751,10 @@ import { OrgTree } from '@/widgets/org-tree/org-tree'
 | C. UI этапа 01 | `status-states`, `performance-indicator`, `use-tree-expansion`, `org-tree`, `app`, `app-providers`, `no-inline-styles` | ARIA-роли; второй уровень виден по умолчанию; name/headcount/индикатор; раскрытие мышью и клавиатурой; сохранение раскрытия при обновлении; отсутствие inline-CSS |
 | D. Логика этапа 02 | `format`, `aggregate-org-tree`, `org-tree-model`, `sort-rows`, `filter-rows`, `use-debounced-value`, `use-media-query` | Формат `12 345 678 руб.`; суммы по поддереву; взвешенная эффективность и случай без сотрудников; глубина 20 000 без переполнения стека; строки в порядке обхода в глубину; мемоизация по ссылке; предки узла; сортировка всех столбцов, стабильность, русская сортировка названий; клик / двойной клик; фильтр (регистр, ё ≡ е, пробелы); дебаунс с перезапуском таймера; media query с подпиской и отпиской, SSR |
 | F. Этап 03 | `backoff`, `reconnecting-socket`, `live-message.schema`, `data-version`, `update-org-tree-model`, `apply-org-tree-patch`, `org-tree.api` / `org-tree.query` (версия), `live-updates-provider`, `connection-indicator`, `flash-on-change`, `collapse`, `org-table` (клавиатура, подсветка), `org-tree` (подсветка, анимация), `app` | Backoff и джиттер; подключение, backoff, сброс, таймаут подключения, watchdog (в том числе асинхронный `onclose`), online/offline, `reconnectNow`, `stop`, игнор событий заменённого сокета; валидация сообщений; инкрементальная модель **совпадает с полной после 200 случайных патчей**, пересчёт только пути, сохранение ссылок; патч: applied / ignored / resync, сохранение неизменённых узлов, отсутствие полной агрегации; провайдер: патч без запроса, resync при пропуске, hello/heartbeat, свежесть, игнор до snapshot и мусорных сообщений, закрытие при unmount; индикатор со всеми состояниями и обратным отсчётом; подсветка только изменившихся ячеек (не при сортировке); высота 0 → px → auto и обратно, `inert`, страховочный таймер, смена направления, reduced motion; навигация по гриду; интеграция `App`: патч от сокета до таблицы и дерева без `GET` |
+| G. Этап 04 | `http-client` (`postJson`), `normalize-search-text`, `ai-search.api`, `apply-search-filter`, `describe-search-filter`, `org-table.ai-search` | POST с JSON и общий контракт ошибок; zod-валидация фильтра (уровни, диапазоны, сортировка, `limit`); все условия фильтра и их комбинация, top-N по сортировке фильтра, та же ссылка без условий; описание условий; интеграция в таблице через замоканный `fetch`: кнопка только при `aiEnabled`, Enter и кнопка, индикатор «Думаю…», применение фильтра и сортировки, чипы, сброс, возврат в текстовый режим при редактировании, fallback при 502 / невалидном ответе / сетевой ошибке, отбрасывание устаревшего ответа, отсутствие повторного запроса |
 | E. UI этапа 02 | `org-table`, `org-tree` (клик по элементу, выделение), `org-dashboard` | Раскрытие ветки кликом по всей строке, ровно одно переключение при клике по названию или стрелке, выбор листа без раскрытия; столбцы и форматы; сортировка: клик, повторный клик, двойной клик ровно с одной перестройкой, клавиатура; фильтр ровно через 250 мс и вместе с сортировкой; «ничего не найдено»; выбор и подсветка строки; раскрытие предков, `aria-selected`, `scrollIntoView` (с учётом reduced motion); split-view ≥1280px и переключатель ниже, реакция на ресайз; синхронизация выбора в обе стороны (таблица → дерево, дерево → таблица) в обоих режимах; прокрутка строки таблицы к узлу, выбранному в дереве; состояния загрузки, ошибки, пустого ответа и отмены; агрегация один раз для дерева и таблицы |
 
-Покрытие: 99,6% строк, 98,6% statements, 94,1% веток. Мутационная проверка: без `structuralSharing` падают 4 теста, без мемоизации модели — 2, без игнорирования второго клика двойного клика — 2, без `stopPropagation` у стрелки — 7.
+Покрытие: 99,6% строк, 98,8% statements, 95,1% веток. Мутационная проверка: без `structuralSharing` падают 4 теста, без мемоизации модели — 2, без игнорирования второго клика двойного клика — 2, без `stopPropagation` у стрелки — 7.
 
 Особенности тестового окружения:
 
@@ -691,6 +772,7 @@ import { OrgTree } from '@/widgets/org-tree/org-tree'
 | `npm run typecheck` | `tsc -b` |
 | `npm run lint` | oxlint |
 | `npm run build` | `tsc -b && vite build` → `dist/` |
+| `npm run size` | Бюджет бандла: gzip-размер всего `dist/` ≤ 200 КБ (`scripts/check-bundle-size.mjs`), иначе exit 1 |
 
 ### Локальная разработка без Docker
 
@@ -705,7 +787,7 @@ cd client  && npm run dev   # :5173, /api проксируется на :8080
 
 Многоэтапный `client/Dockerfile`:
 
-1. `build` (`node:22-alpine`) — `npm ci` и `npm run build` → `dist/`;
+1. `build` (`node:22-alpine`) — `npm ci`, `npm run build` → `dist/` и `npm run size`: сборка образа падает, если бандл больше 200 КБ gzip (сейчас ≈ 124 КБ);
 2. `runtime` (`nginx:stable-alpine`) — только статика из `dist/` и конфиг nginx.
 
 `client/nginx/default.conf.template` — шаблон, который entrypoint образа nginx рендерит через `envsubst` в `/etc/nginx/conf.d/default.conf`:
@@ -713,9 +795,11 @@ cd client  && npm run dev   # :5173, /api проксируется на :8080
 | location | Поведение |
 |---|---|
 | `= /api/live` | WebSocket: `Upgrade`/`Connection: upgrade` (через `map $http_upgrade`), `proxy_read_timeout 1h`, `proxy_connect_timeout 5s` |
-| `/api/` | `proxy_pass ${API_UPSTREAM}` (по умолчанию `http://backend:8080`) с заголовками `Host`, `X-Real-IP`, `X-Forwarded-*` |
+| `/api/` | `proxy_pass ${API_UPSTREAM}` (по умолчанию `http://backend:8080`) с заголовками `Host`, `X-Real-IP`, `X-Forwarded-*`; `proxy_read_timeout 30s` — с запасом над таймаутом LLM |
 | `/assets/` | Файлы с хешем от Vite: `Cache-Control: public, max-age=31536000, immutable` |
 | `/` | SPA fallback `try_files … /index.html`, `Cache-Control: no-cache`, чтобы новый деплой подхватывался сразу |
+
+**gzip** включён на уровне `server` для `text/css`, `application/javascript`, `application/json`, `image/svg+xml` и других текстовых типов (`gzip_comp_level 6`, `gzip_min_length 256`, `gzip_vary on`, `gzip_proxied any` — сжимаются и ответы API). Проверка: `curl -H 'Accept-Encoding: gzip' -I http://localhost:5173/assets/<файл>.js` → `Content-Encoding: gzip`.
 
 ETag и `304` от backend проходят через прокси без изменений. В браузере повторный запрос с неизменными данными стоит `304` без тела, а TanStack Query через structural sharing дополнительно сохраняет ссылку на `data`.
 
@@ -732,7 +816,7 @@ docker-compose up --build     # или: docker compose up --build
 
 | Сервис | Build context | Образ | Порт на хосте → контейнер | Особенности |
 |---|---|---|---|---|
-| `backend` | `./backend` | `staff-pulse-backend` | `${BACKEND_PORT:-8080}` → `8080` | `NODE_ENV=production`, `LIVE_*` из `.env`, `init: true` (корректная передача SIGTERM), `restart: unless-stopped` |
+| `backend` | `./backend` | `staff-pulse-backend` | `${BACKEND_PORT:-8080}` → `8080` | `NODE_ENV=production`, `LIVE_*` и `OPENAI_*` из `.env`, `init: true` (корректная передача SIGTERM), `restart: unless-stopped` |
 | `client` | `./client` | `staff-pulse-client` | `${CLIENT_PORT:-5173}` → `80` | `API_UPSTREAM=http://backend:8080`, `depends_on: backend`, `restart: unless-stopped` |
 
 Сервисы находят друг друга по имени в сети Compose по умолчанию (`backend` резолвится в IP контейнера).
@@ -749,6 +833,10 @@ Compose автоматически читает `.env` из корня. Все �
 | `LIVE_UPDATE_INTERVAL_MS` | `3000` | Период изменений данных |
 | `LIVE_UPDATE_MAX_NODES` | `3` | Максимум узлов за такт |
 | `LIVE_HEARTBEAT_INTERVAL_MS` | `15000` | Период ping и heartbeat |
+| `OPENAI_API_KEY` | пусто | Ключ OpenAI для AI-поиска; без него поиск работает как текстовый |
+| `OPENAI_MODEL` | `gpt-5.6-luna` | Модель |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Базовый URL Responses API |
+| `AI_SEARCH_TIMEOUT_MS` | `15000` | Таймаут запроса к LLM |
 
 ### Полезные команды
 
@@ -759,3 +847,21 @@ docker-compose ps
 docker-compose down --rmi local   # остановить, удалить контейнеры, сеть и собранные образы
 ```
 
+## Makefile
+
+Корневой `Makefile` — короткие команды для локальной сборки, тестов и запуска. Зависимости (`npm ci`) ставятся автоматически, если `node_modules` нет или изменился `package-lock.json`.
+
+| Цель | Действие |
+|---|---|
+| `make build-server` | `backend`: зависимости, `npm run build` → `backend/dist/` |
+| `make build-client` | `client`: зависимости, `npm run build` → `client/dist/`, проверка бюджета бандла (`npm run size`) |
+| `make build` | `build-server` + `build-client` + production-образы `docker compose build` |
+| `make test-server` | `backend`: typecheck + unit / integration / contract тесты |
+| `make test-client` | `client`: typecheck + lint + тесты |
+| `make test` | `test-server` + `test-client` |
+| `make start` | `docker compose up -d --build`, адрес клиента в консоли |
+| `make stop` | `docker compose down` |
+| `make logs` | `docker compose logs -f` |
+| `make help` | Список целей |
+
+Бинарь compose переопределяется переменной: `make start COMPOSE=docker-compose`.

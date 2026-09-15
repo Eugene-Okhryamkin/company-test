@@ -3,10 +3,12 @@ import type { OrgTableRow } from '@/entities/org-node/lib/org-tree-model'
 import { PerformanceIndicator } from '@/entities/org-node/ui/performance-indicator'
 import { formatNumber, formatPerformance, formatRub } from '@/shared/lib/format'
 import { prefersReducedMotion } from '@/shared/lib/prefers-reduced-motion'
-import { useDebouncedValue } from '@/shared/lib/use-debounced-value'
+import { applySearchFilter } from '@/features/ai-search/lib/apply-search-filter'
+import { useSmartSearch } from '@/features/ai-search/model/use-smart-search'
+import { SmartSearchBar } from '@/features/ai-search/ui/smart-search-bar'
 import { FlashOnChange } from '@/shared/ui/flash-on-change'
 import { filterRowsByName } from '@/widgets/org-table/lib/filter-rows'
-import { applySortToggle, sortRows, type SortKey, type SortState } from '@/widgets/org-table/lib/sort-rows'
+import { applySortToggle, sortRows, type SortKey, type SortState } from '@/entities/org-node/lib/sort-rows'
 import {
   BodyRow,
   Cell,
@@ -14,7 +16,6 @@ import {
   EmptyCell,
   HeaderCell,
   PerformanceValue,
-  SearchInput,
   SortButton,
   Table,
   Toolbar,
@@ -53,14 +54,16 @@ interface OrgTableProps {
 
 export function OrgTable({ rows, selectedId, onSelect }: OrgTableProps) {
   const [sort, setSort] = useState<SortState>(null)
-  const [query, setQuery] = useState('')
-  const debouncedQuery = useDebouncedValue(query, FILTER_DEBOUNCE_MS)
+  // An AI filter brings its own order ("top 5 by budget"); the user can re-sort afterwards.
+  const search = useSmartSearch({ debounceMs: FILTER_DEBOUNCE_MS, onAiFilter: (filter) => setSort(filter.sort) })
+  const { aiFilter, textQuery } = search
   const tableRef = useRef<HTMLTableElement>(null)
 
   const visibleRows = useMemo(
-    () => sortRows(filterRowsByName(rows, debouncedQuery), sort),
-    [rows, debouncedQuery, sort],
+    () => sortRows(aiFilter ? applySearchFilter(rows, aiFilter.filter) : filterRowsByName(rows, textQuery), sort),
+    [rows, aiFilter, textQuery, sort],
   )
+  const emptyQuery = aiFilter ? aiFilter.query : textQuery.trim()
 
   // Roving tabindex: exactly one cell of the grid is tabbable.
   const [active, setActive] = useState<ActiveCell>({ rowId: selectedId, col: 0 })
@@ -121,16 +124,11 @@ export function OrgTable({ rows, selectedId, onSelect }: OrgTableProps) {
   return (
     <>
       <Toolbar>
-        <SearchInput
-          type="search"
-          aria-label="Фильтр по названию"
-          placeholder="Поиск по названию…"
-          value={query}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-        <Count aria-live="polite">
-          Показано {visibleRows.length} из {rows.length}
-        </Count>
+        <SmartSearchBar search={search}>
+          <Count aria-live="polite">
+            Показано {visibleRows.length} из {rows.length}
+          </Count>
+        </SmartSearchBar>
       </Toolbar>
 
       <Table
@@ -169,7 +167,7 @@ export function OrgTable({ rows, selectedId, onSelect }: OrgTableProps) {
           {visibleRows.length === 0 ? (
             <tr>
               <EmptyCell role="gridcell" colSpan={COLUMNS.length}>
-                Ничего не найдено по запросу «{debouncedQuery.trim()}»
+                Ничего не найдено по запросу «{emptyQuery}»
               </EmptyCell>
             </tr>
           ) : (

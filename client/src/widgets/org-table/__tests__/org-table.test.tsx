@@ -28,7 +28,7 @@ const typeInto = (input: HTMLElement, text: string) => {
     fireEvent.change(input, { target: { value: text.slice(0, length) } })
   }
 }
-const searchbox = () => screen.getByRole('searchbox', { name: 'Фильтр по названию' })
+const searchbox = () => screen.getByRole('searchbox', { name: 'Поиск подразделений' })
 
 const scrollIntoView = vi.fn()
 beforeEach(() => {

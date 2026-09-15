@@ -9,6 +9,8 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
 RUN npm run build
+# Fail the image build if the production bundle exceeds the 200 KB gzip budget.
+RUN npm run size
 
 # --- serve with nginx ---
 FROM ${NGINX_IMAGE} AS runtime

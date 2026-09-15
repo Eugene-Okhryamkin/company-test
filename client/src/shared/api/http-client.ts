@@ -26,14 +26,19 @@ export interface GetJsonOptions {
   onResponse?: (response: Response) => void
 }
 
-/**
- * GET a JSON resource and validate it against a schema.
- * Every failure becomes an ApiError, except aborts which are rethrown as-is.
- */
-export async function getJson<T>(url: string, schema: z.ZodType<T>, { signal, onResponse }: GetJsonOptions = {}): Promise<T> {
+export interface PostJsonOptions {
+  signal?: AbortSignal
+}
+
+async function requestJson<T>(
+  url: string,
+  schema: z.ZodType<T>,
+  init: RequestInit,
+  onResponse?: (response: Response) => void,
+): Promise<T> {
   let response: Response
   try {
-    response = await fetch(url, { signal, headers: { Accept: 'application/json' } })
+    response = await fetch(url, init)
   } catch (error) {
     if (isAbortError(error)) throw error
     throw new ApiError('network', 'Network request failed', { cause: error })
@@ -60,4 +65,22 @@ export async function getJson<T>(url: string, schema: z.ZodType<T>, { signal, on
     })
   }
   return result.data
+}
+
+/**
+ * GET a JSON resource and validate it against a schema.
+ * Every failure becomes an ApiError, except aborts which are rethrown as-is.
+ */
+export function getJson<T>(url: string, schema: z.ZodType<T>, { signal, onResponse }: GetJsonOptions = {}): Promise<T> {
+  return requestJson(url, schema, { signal, headers: { Accept: 'application/json' } }, onResponse)
+}
+
+/** POST a JSON body and validate the JSON answer; same error contract as getJson. */
+export function postJson<T>(url: string, body: unknown, schema: z.ZodType<T>, { signal }: PostJsonOptions = {}): Promise<T> {
+  return requestJson(url, schema, {
+    method: 'POST',
+    signal,
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { OrgTableRow } from '@/entities/org-node/lib/org-tree-model'
-import { applySortToggle, sortRows, type SortState } from '@/widgets/org-table/lib/sort-rows'
+import { applySortToggle, sortRows, type SortState } from '@/entities/org-node/lib/sort-rows'
 
 const row = (overrides: Partial<OrgTableRow>): OrgTableRow => ({
   id: 'x',

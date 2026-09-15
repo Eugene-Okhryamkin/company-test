@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
-import { ApiError, getJson } from '@/shared/api/http-client'
+import { ApiError, getJson, postJson } from '@/shared/api/http-client'
 
 const schema = z.array(z.object({ id: z.string() }))
 const fetchMock = vi.fn<typeof fetch>()
@@ -86,5 +86,33 @@ describe('getJson', () => {
     fetchMock.mockRejectedValue(abort)
 
     await expect(getJson('/api/x', schema)).rejects.toBe(abort)
+  })
+})
+
+describe('postJson', () => {
+  const answerSchema = z.object({ ok: z.boolean() })
+
+  it('sends the body as JSON and returns validated data', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ ok: true }))
+    const controller = new AbortController()
+
+    await expect(postJson('/api/y', { query: 'x' }, answerSchema, { signal: controller.signal })).resolves.toEqual({ ok: true })
+    expect(fetchMock).toHaveBeenCalledWith('/api/y', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: '{"query":"x"}',
+    })
+  })
+
+  it('shares error handling with getJson', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'AI search is not configured' }, { status: 503 }))
+    await expect(postJson('/api/y', {}, answerSchema)).rejects.toMatchObject({ kind: 'http', status: 503 })
+
+    fetchMock.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    await expect(postJson('/api/y', {}, answerSchema)).rejects.toMatchObject({ kind: 'network' })
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: 'yes' }))
+    await expect(postJson('/api/y', {}, answerSchema)).rejects.toMatchObject({ kind: 'validation' })
   })
 })
