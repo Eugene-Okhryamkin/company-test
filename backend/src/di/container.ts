@@ -1,6 +1,8 @@
 import { asClass, asValue, createContainer, InjectionMode, type AwilixContainer } from 'awilix';
+import { OpenAiResponsesClient, type LlmClient } from '@/clients/openai-responses.client.js';
 import type { AppConfig } from '@/config.js';
 import { OrgTreeController } from '@/controllers/org-tree.controller.js';
+import { SearchController } from '@/controllers/search.controller.js';
 import { OrgTreeChangeBus } from '@/events/org-tree-change-bus.js';
 import { LiveUpdatesGateway } from '@/gateways/live-updates.gateway.js';
 import { OrgNodeMapper } from '@/mappers/org-node.mapper.js';
@@ -10,6 +12,7 @@ import {
   type OrgNodeRepository,
 } from '@/repositories/org-node.repository.js';
 import { orgNodesSeed } from '@/seeds/org-nodes.seed.js';
+import { AiSearchService, type AiSearchServiceApi } from '@/services/ai-search.service.js';
 import { LiveUpdateSimulator } from '@/services/live-update-simulator.js';
 import { OrgTreeService, type OrgTreeServiceApi } from '@/services/org-tree.service.js';
 
@@ -27,6 +30,11 @@ export interface Cradle {
   orgTreeController: OrgTreeController;
   liveUpdateSimulator: LiveUpdateSimulator;
   liveUpdatesGateway: LiveUpdatesGateway;
+  /** HTTP transport for outbound calls (LLM); replaced by a stub in tests. */
+  fetchFn: typeof fetch;
+  llmClient: LlmClient;
+  aiSearchService: AiSearchServiceApi;
+  searchController: SearchController;
 }
 
 export type AppContainer = AwilixContainer<Cradle>;
@@ -58,6 +66,10 @@ export function createAppContainer(config: AppConfig): AppContainer {
     liveUpdatesGateway: asClass(LiveUpdatesGateway)
       .singleton()
       .disposer((gateway) => gateway.close()),
+    fetchFn: asValue(globalThis.fetch),
+    llmClient: asClass(OpenAiResponsesClient).singleton(),
+    aiSearchService: asClass(AiSearchService).singleton(),
+    searchController: asClass(SearchController).singleton(),
   });
 
   return container;

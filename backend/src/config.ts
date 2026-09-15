@@ -11,13 +11,27 @@ export interface LiveUpdatesConfig {
   heartbeatIntervalMs: number;
 }
 
+export interface AiSearchConfig {
+  /** OpenAI API key; undefined → AI search is disabled and clients fall back to text search. */
+  apiKey: string | undefined;
+  model: string;
+  /** Responses API base URL (override for a proxy or a compatible gateway). */
+  baseUrl: string;
+  /** Upper bound for one LLM request, ms. */
+  timeoutMs: number;
+}
+
 export interface AppConfig {
   port: number;
   /** undefined → listen on "::" (IPv4 + IPv6), Node falls back to 0.0.0.0. */
   host: string | undefined;
   env: string;
   liveUpdates: LiveUpdatesConfig;
+  aiSearch: AiSearchConfig;
 }
+
+export const DEFAULT_OPENAI_MODEL = 'gpt-5.6-luna';
+export const DEFAULT_OPENAI_BASE_URL = 'https://api.openai.com/v1';
 
 export function parsePort(value: string | undefined): number {
   if (!value || !/^\d+$/.test(value)) return DEFAULT_PORT;
@@ -41,6 +55,12 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
       intervalMs: parsePositiveInt(env.LIVE_UPDATE_INTERVAL_MS, 3000, 250),
       maxNodesPerTick: parsePositiveInt(env.LIVE_UPDATE_MAX_NODES, 3),
       heartbeatIntervalMs: parsePositiveInt(env.LIVE_HEARTBEAT_INTERVAL_MS, 15000),
+    },
+    aiSearch: {
+      apiKey: env.OPENAI_API_KEY?.trim() || undefined,
+      model: env.OPENAI_MODEL?.trim() || DEFAULT_OPENAI_MODEL,
+      baseUrl: env.OPENAI_BASE_URL?.trim() || DEFAULT_OPENAI_BASE_URL,
+      timeoutMs: parsePositiveInt(env.AI_SEARCH_TIMEOUT_MS, 15000, 1000),
     },
   };
 }

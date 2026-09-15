@@ -1,7 +1,10 @@
 import { asValue } from 'awilix';
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '@/config.js';
+import { OpenAiResponsesClient } from '@/clients/openai-responses.client.js';
 import { OrgTreeController } from '@/controllers/org-tree.controller.js';
+import { SearchController } from '@/controllers/search.controller.js';
+import { AiSearchService } from '@/services/ai-search.service.js';
 import { createAppContainer } from '@/di/container.js';
 import { OrgNodeMapper } from '@/mappers/org-node.mapper.js';
 import { InMemoryOrgNodeRepository } from '@/repositories/org-node.repository.js';
@@ -20,10 +23,13 @@ describe('createAppContainer', () => {
 
     expect(Object.keys(container.registrations).sort()).toEqual(
       [
+        'aiSearchService',
         'clock',
         'config',
+        'fetchFn',
         'liveUpdateSimulator',
         'liveUpdatesGateway',
+        'llmClient',
         'orgNodeMapper',
         'orgNodeRepository',
         'orgNodesSeed',
@@ -31,6 +37,7 @@ describe('createAppContainer', () => {
         'orgTreeController',
         'orgTreeService',
         'random',
+        'searchController',
       ],
     );
   });
@@ -49,6 +56,10 @@ describe('createAppContainer', () => {
     expect(container.resolve('liveUpdatesGateway')).toBeInstanceOf(LiveUpdatesGateway);
     expect(container.resolve('random')).toBe(Math.random);
     expect(container.resolve('clock')()).toBeInstanceOf(Date);
+    expect(container.resolve('fetchFn')).toBe(globalThis.fetch);
+    expect(container.resolve('llmClient')).toBeInstanceOf(OpenAiResponsesClient);
+    expect(container.resolve('aiSearchService')).toBeInstanceOf(AiSearchService);
+    expect(container.resolve('searchController')).toBeInstanceOf(SearchController);
   });
 
   it('shares one change bus between the service and the gateway', () => {

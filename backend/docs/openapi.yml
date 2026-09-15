@@ -1,0 +1,385 @@
+openapi: 3.1.0
+info:
+  title: Staff Pulse mock API
+  version: 0.4.0
+  summary: Org structure data, live updates and AI search for the Staff Pulse dashboard.
+  description: |
+    REST API of the mock backend (`backend/`). The browser reaches it on the same origin
+    through nginx (`/api/*`) or the Vite dev proxy; the backend itself listens on port 8080.
+
+    **Live updates** are not REST: a WebSocket at `GET /api/live` (HTTP upgrade) pushes
+    server → client JSON messages, see the `LiveMessage` schema and `docs/data-model.md`:
+    - `hello` on connect — current data version and heartbeat interval;
+    - `patch` — changed nodes (all live metrics + `updatedAt`) with the new data version;
+    - `heartbeat` — every `LIVE_HEARTBEAT_INTERVAL_MS`, with the current version.
+
+    All errors have the `Error` shape and never contain internal details.
+servers:
+  - url: http://localhost:5173
+    description: docker-compose (nginx → backend)
+  - url: http://localhost:8080
+    description: backend directly
+tags:
+  - name: org-tree
+    description: Organisational structure
+  - name: search
+    description: Natural-language search (OpenAI Structured Outputs)
+paths:
+  /api/org-tree:
+    get:
+      tags: [org-tree]
+      operationId: getOrgTree
+      summary: Flat list of all organisational units
+      description: |
+        Divisions, departments and teams as a flat list; the tree is built on the client via `parentId`.
+        Metrics are the node's own values (descendants not included). The response is always
+        revalidated (`Cache-Control: no-cache`) and supports conditional requests via `ETag`.
+      parameters:
+        - name: If-None-Match
+          in: header
+          required: false
+          description: ETag of a previously received response.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current snapshot.
+          headers:
+            X-Data-Version:
+              description: Monotonic data version; aligns the snapshot with live patches.
+              schema:
+                type: string
+                pattern: '^\d+$'
+            ETag:
+              description: Weak entity tag of the body.
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+                const: no-cache
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrgNodeList'
+              example:
+                - id: d1
+                  name: Технологии
+                  parentId: null
+                  headcount: 12
+                  budget: 18000000
+                  performance: 82
+                  updatedAt: '2026-09-01T09:00:00.000Z'
+                - id: d1-1
+                  name: Платформа
+                  parentId: d1
+                  headcount: 8
+                  budget: 9500000
+                  performance: 76.5
+                  updatedAt: '2026-09-01T09:00:00.000Z'
+        '304':
+          description: Not modified (`If-None-Match` matched), empty body.
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/search/status:
+    get:
+      tags: [search]
+      operationId: getSearchStatus
+      summary: Whether AI search is available
+      description: AI search is enabled when the backend has `OPENAI_API_KEY`. Otherwise clients use text search.
+      responses:
+        '200':
+          description: Availability flag.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchStatus'
+              example:
+                aiEnabled: true
+
+  /api/search/interpret:
+    post:
+      tags: [search]
+      operationId: interpretSearchQuery
+      summary: Turn a natural-language query into a structured filter
+      description: |
+        The query is sent to the OpenAI Responses API with a strict JSON Schema (Structured Outputs),
+        the answer is validated and normalised, and the resulting filter is applied **on the client**
+        to the analytics table. Numeric ranges refer to the table values: subtree totals and the
+        weighted average performance. On 502/503 clients fall back to text search by name.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InterpretRequest'
+            example:
+              query: топ-3 команды по бюджету с эффективностью ниже 60
+      responses:
+        '200':
+          description: Structured filter.
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                const: no-store
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InterpretResponse'
+              example:
+                filter:
+                  nameContains: null
+                  levels: [3]
+                  totalHeadcount: { min: null, max: null }
+                  totalBudget: { min: null, max: null }
+                  avgPerformance: { min: null, max: 59.99 }
+                  sort: { key: totalBudget, direction: desc }
+                  limit: 3
+        '400':
+          description: Missing, blank or too long query, or malformed JSON.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: '"query" must be a non-empty string'
+        '413':
+          description: Request body larger than 8 KB.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: Payload Too Large
+        '502':
+          description: The LLM failed (network, timeout, HTTP error, refusal, invalid answer).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: AI search failed
+        '503':
+          description: AI search is not configured (no `OPENAI_API_KEY`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: AI search is not configured
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/live:
+    get:
+      tags: [org-tree]
+      operationId: liveUpdates
+      summary: WebSocket with live data patches
+      description: |
+        Upgrade to WebSocket (`Connection: Upgrade`, `Upgrade: websocket`). Messages are JSON text
+        frames matching `LiveMessage`. The server pings clients and terminates unresponsive ones.
+        Other paths are not upgraded.
+      responses:
+        '101':
+          description: Switching protocols; messages follow the `LiveMessage` schema.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LiveMessage'
+
+components:
+  responses:
+    InternalError:
+      description: Unexpected error (details are only logged on the server).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Internal Server Error
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      additionalProperties: false
+      properties:
+        error:
+          type: string
+
+    OrgNode:
+      type: object
+      description: Organisational unit. Metrics are own values, descendants not included.
+      required: [id, name, parentId, headcount, budget, performance, updatedAt]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 1
+        parentId:
+          description: null for divisions (roots).
+          type: [string, 'null']
+          minLength: 1
+        headcount:
+          type: integer
+          minimum: 0
+        budget:
+          description: Roubles.
+          type: number
+          minimum: 0
+        performance:
+          type: number
+          minimum: 0
+          maximum: 100
+        updatedAt:
+          type: string
+          format: date-time
+          pattern: '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$'
+
+    OrgNodeList:
+      type: array
+      description: Forms a valid forest — unique ids, existing parents, no cycles.
+      items:
+        $ref: '#/components/schemas/OrgNode'
+
+    OrgNodePatch:
+      type: object
+      required: [id, headcount, budget, performance, updatedAt]
+      additionalProperties: false
+      properties:
+        id:
+          type: string
+        headcount:
+          type: integer
+          minimum: 0
+        budget:
+          type: number
+          minimum: 0
+        performance:
+          type: number
+          minimum: 0
+          maximum: 100
+        updatedAt:
+          type: string
+          format: date-time
+
+    LiveMessage:
+      oneOf:
+        - type: object
+          required: [type, version, heartbeatIntervalMs]
+          additionalProperties: false
+          properties:
+            type: { const: hello }
+            version: { type: integer, minimum: 0 }
+            heartbeatIntervalMs: { type: integer, minimum: 1 }
+        - type: object
+          required: [type, version, nodes]
+          additionalProperties: false
+          properties:
+            type: { const: patch }
+            version: { type: integer, minimum: 1 }
+            nodes:
+              type: array
+              minItems: 1
+              items:
+                $ref: '#/components/schemas/OrgNodePatch'
+        - type: object
+          required: [type, version]
+          additionalProperties: false
+          properties:
+            type: { const: heartbeat }
+            version: { type: integer, minimum: 0 }
+
+    SearchStatus:
+      type: object
+      required: [aiEnabled]
+      additionalProperties: false
+      properties:
+        aiEnabled:
+          type: boolean
+
+    InterpretRequest:
+      type: object
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 300
+          description: Natural-language query, trimmed on the server.
+
+    NumericRange:
+      type: object
+      description: Inclusive bounds; null means no bound. min ≤ max.
+      required: [min, max]
+      additionalProperties: false
+      properties:
+        min:
+          type: [number, 'null']
+          minimum: 0
+        max:
+          type: [number, 'null']
+          minimum: 0
+
+    SearchFilter:
+      type: object
+      required: [nameContains, levels, totalHeadcount, totalBudget, avgPerformance, sort, limit]
+      additionalProperties: false
+      properties:
+        nameContains:
+          description: Case-insensitive substring of the unit name (ё ≡ е).
+          type: [string, 'null']
+          minLength: 1
+        levels:
+          description: 1 — division, 2 — department, 3 — team. Empty — any level.
+          type: array
+          uniqueItems: true
+          items:
+            type: integer
+            enum: [1, 2, 3]
+        totalHeadcount:
+          $ref: '#/components/schemas/NumericRange'
+        totalBudget:
+          $ref: '#/components/schemas/NumericRange'
+        avgPerformance:
+          description: 0–100.
+          allOf:
+            - $ref: '#/components/schemas/NumericRange'
+            - properties:
+                min: { type: [number, 'null'], maximum: 100 }
+                max: { type: [number, 'null'], maximum: 100 }
+        sort:
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [key, direction]
+              additionalProperties: false
+              properties:
+                key:
+                  type: string
+                  enum: [name, level, totalHeadcount, totalBudget, avgPerformance]
+                direction:
+                  type: string
+                  enum: [asc, desc]
+        limit:
+          description: Keep the first N rows by `sort` ("top N").
+          type: [integer, 'null']
+          minimum: 1
+
+    InterpretResponse:
+      type: object
+      required: [filter]
+      additionalProperties: false
+      properties:
+        filter:
+          $ref: '#/components/schemas/SearchFilter'

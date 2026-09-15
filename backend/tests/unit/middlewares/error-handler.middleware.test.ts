@@ -30,4 +30,28 @@ describe('errorHandler', () => {
     expect(res.status).not.toHaveBeenCalled();
     expect(res.json).not.toHaveBeenCalled();
   });
+
+  it.each([
+    [400, 'Bad Request'],
+    [413, 'Payload Too Large'],
+  ])('passes through client error %i raised by Express middleware', (status, message) => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = mockResponse(false);
+    const error = Object.assign(new Error('Unexpected end of JSON input'), { status, expose: true });
+
+    errorHandler(error, {} as Request, res as unknown as Response, vi.fn() as NextFunction);
+
+    expect(log).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(status);
+    expect(res.json).toHaveBeenCalledWith({ error: message });
+  });
+
+  it('does not trust a status on an error that is not marked as exposable', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = mockResponse(false);
+
+    errorHandler(Object.assign(new Error('x'), { status: 400 }), {} as Request, res as unknown as Response, vi.fn() as NextFunction);
+
+    expect(res.status).toHaveBeenCalledWith(500);
+  });
 });
