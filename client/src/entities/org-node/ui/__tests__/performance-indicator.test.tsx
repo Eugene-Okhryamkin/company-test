@@ -16,6 +16,12 @@ describe('PerformanceIndicator', () => {
     expect(indicator).toHaveAttribute('title', label)
   })
 
+  it('uses the exact value for the level and one decimal for fractional values', () => {
+    renderWithProviders(<PerformanceIndicator value={79.96} />)
+    const indicator = screen.getByRole('img', { name: 'Эффективность 80,0 из 100 — средняя' })
+    expect(indicator).toHaveAttribute('data-level', 'medium')
+  })
+
   it('differs in color between levels without inline styles', () => {
     renderWithProviders(
       <>

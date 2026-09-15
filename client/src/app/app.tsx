@@ -1,6 +1,6 @@
 import styled from 'styled-components'
 import { AppProviders } from '@/app/app-providers'
-import { OrgTreePanel } from '@/widgets/org-tree/org-tree-panel'
+import { OrgDashboard } from '@/widgets/org-dashboard/org-dashboard'
 
 const Header = styled.header`
   display: flex;
@@ -22,7 +22,7 @@ const Subtitle = styled.span`
 `
 
 const Main = styled.main`
-  max-width: 960px;
+  max-width: 1600px;
   margin: 0 auto;
   padding: 24px;
 `
@@ -35,7 +35,7 @@ export function App() {
         <Subtitle>мониторинг оргструктуры</Subtitle>
       </Header>
       <Main>
-        <OrgTreePanel />
+        <OrgDashboard />
       </Main>
     </AppProviders>
   )

@@ -5,10 +5,11 @@ import { sampleOrgNodes } from '@/test/fixtures'
 
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn<typeof fetch>().mockResolvedValue(Response.json(sampleOrgNodes)))
+  Element.prototype.scrollIntoView = vi.fn()
 })
 
 describe('App', () => {
-  it('renders the dashboard shell with the org tree', async () => {
+  it('renders the dashboard shell', async () => {
     render(<App />)
 
     expect(screen.getByRole('banner')).toHaveTextContent('Staff Pulse')

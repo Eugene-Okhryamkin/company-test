@@ -2,7 +2,8 @@ import { QueryClientProvider, type QueryClient } from '@tanstack/react-query'
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { StrictMode, type ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { orgTreeQueryKey, useOrgTreeQuery } from '@/entities/org-node/api/org-tree.query'
+import { orgTreeQueryKey, useOrgTreeModelQuery, useOrgTreeQuery } from '@/entities/org-node/api/org-tree.query'
+import * as aggregateModule from '@/entities/org-node/lib/aggregate-org-tree'
 import { ApiError } from '@/shared/api/http-client'
 import { createQueryClient } from '@/shared/api/query-client'
 import { makeOrgNode, sampleOrgNodes } from '@/test/fixtures'
@@ -143,5 +144,30 @@ describe('useOrgTreeQuery', () => {
     unmount()
 
     await waitFor(() => expect(signal?.aborted).toBe(true))
+  })
+
+  describe('useOrgTreeModelQuery', () => {
+    it('selects the derived model (forest, stats, rows) from the cached data', async () => {
+      fetchMock.mockResolvedValue(Response.json(sampleOrgNodes))
+      const { result } = renderHook(() => useOrgTreeModelQuery(), { wrapper })
+
+      await waitFor(() => expect(result.current.isSuccess).toBe(true))
+      expect(result.current.data!.rows).toHaveLength(sampleOrgNodes.length)
+      expect(result.current.data!.stats.get('d1')!.totalHeadcount).toBe(21)
+    })
+
+    it('aggregates once and shares the same model between several consumers', async () => {
+      const aggregate = vi.spyOn(aggregateModule, 'aggregateOrgTree')
+      fetchMock.mockImplementation(async () => Response.json(sampleOrgNodes))
+      const { result } = renderHook(() => [useOrgTreeModelQuery(), useOrgTreeModelQuery()] as const, { wrapper })
+
+      await waitFor(() => expect(result.current[0].isSuccess && result.current[1].isSuccess).toBe(true))
+      expect(result.current[0].data).toBe(result.current[1].data)
+      expect(aggregate).toHaveBeenCalledTimes(1)
+
+      await act(() => client.refetchQueries({ queryKey: orgTreeQueryKey }))
+      await waitFor(() => expect(client.getQueryState(orgTreeQueryKey)?.dataUpdateCount).toBe(2))
+      expect(aggregate).toHaveBeenCalledTimes(1)
+    })
   })
 })

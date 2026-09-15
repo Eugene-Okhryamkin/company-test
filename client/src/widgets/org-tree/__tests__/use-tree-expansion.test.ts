@@ -40,3 +40,24 @@ describe('useTreeExpansion', () => {
     expect(result.current.isExpanded).toBe(isExpanded)
   })
 })
+
+describe('useTreeExpansion.expand', () => {
+  it('forces the given nodes open', () => {
+    const { result } = renderHook(() => useTreeExpansion())
+    act(() => result.current.toggle('d1', 1))
+
+    act(() => result.current.expand(['d1', 'd1-1']))
+
+    expect(result.current.isExpanded('d1', 1)).toBe(true)
+    expect(result.current.isExpanded('d1-1', 2)).toBe(true)
+  })
+
+  it('keeps state untouched (no re-render) when everything is already open', () => {
+    const { result } = renderHook(() => useTreeExpansion())
+    act(() => result.current.expand(['d1']))
+    const before = result.current.isExpanded
+
+    act(() => result.current.expand(['d1']))
+    expect(result.current.isExpanded).toBe(before)
+  })
+})

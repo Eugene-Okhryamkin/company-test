@@ -26,5 +26,15 @@ export function useTreeExpansion(defaultDepth: number = DEFAULT_EXPANDED_DEPTH) 
     [defaultDepth],
   )
 
-  return { isExpanded, toggle }
+  /** Forces nodes open (e.g. the ancestors of a selected node). No-op if already forced open. */
+  const expand = useCallback((ids: readonly string[]) => {
+    setOverrides((previous) => {
+      if (ids.every((id) => previous.get(id) === true)) return previous
+      const next = new Map(previous)
+      for (const id of ids) next.set(id, true)
+      return next
+    })
+  }, [])
+
+  return { isExpanded, toggle, expand }
 }

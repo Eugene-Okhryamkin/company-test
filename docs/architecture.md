@@ -1,6 +1,6 @@
 # Архитектура
 
-> Документ дополняется по мере реализации этапов. Сейчас описаны **backend**, **client** (этап 01 FOUNDATION) и **запуск через Docker Compose**. Нетривиальные решения вынесены в [ADR](adr/).
+> Документ дополняется по мере реализации этапов. Сейчас описаны **backend**, **client** (этапы 01 FOUNDATION и 02 CORE) и **запуск через Docker Compose**. Модель данных и алгоритм агрегации — в [`data-model.md`](data-model.md). Нетривиальные решения вынесены в [ADR](adr/).
 
 ## Обзор
 
@@ -337,7 +337,7 @@ docker run -d --name staff-pulse-backend -p 8080:8080 staff-pulse-backend
 
 ## Client
 
-SPA на **Vite 8 + React 19 + TypeScript 6**. Стили на **styled-components**, запросы и кэш через **TanStack Query**, runtime-валидация через **zod**. UI-библиотек нет.
+SPA на **Vite 8 + React 19 + TypeScript 6**: дерево оргструктуры и аналитическая таблица. Стили на **styled-components**, запросы и кэш через **TanStack Query**, runtime-валидация через **zod**. UI-библиотек нет.
 
 ### Стек
 
@@ -363,38 +363,48 @@ app  →  widgets  →  entities  →  shared
 | Слой | Каталог | Ответственность |
 |---|---|---|
 | **app** | `src/app/` | Точка сборки: провайдеры (тема, глобальные стили, `QueryClientProvider`), единый `queryClient`, каркас страницы |
-| **widgets** | `src/widgets/org-tree/` | Готовые блоки интерфейса: `OrgTreePanel` (состояния загрузки, ошибки и пустого ответа), `OrgTree`, `OrgTreeItem`, `useTreeExpansion` |
-| **entities** | `src/entities/org-node/` | Предметная сущность «узел оргструктуры»: схема (`model`), запрос, ключ и `useOrgTreeQuery` (`api`), построение дерева (`lib`), `PerformanceIndicator` (`ui`) |
-| **shared** | `src/shared/` | Код без привязки к предметной области: HTTP-клиент, ошибки и фабрика `QueryClient` с настройками проекта (`api`), тема и глобальные стили (`styles`), базовые компоненты состояний (`ui`) |
+| **widgets** | `src/widgets/` | Готовые блоки интерфейса. `org-dashboard` — состояния данных, раскладка (split-view или переключатель) и общее выделение. `org-tree` — дерево. `org-table` — аналитическая таблица с сортировкой и фильтром |
+| **entities** | `src/entities/org-node/` | Предметная сущность «узел оргструктуры»: схема (`model`), запрос и хуки (`api`), построение дерева, агрегация и модель (`lib`), `PerformanceIndicator` (`ui`) |
+| **shared** | `src/shared/` | Код без привязки к предметной области: HTTP-клиент, ошибки и фабрика `QueryClient` (`api`), форматирование, дебаунс, media query (`lib`), тема (`styles`), базовые компоненты (`ui`) |
 
 ```
 client/src/
 ├── main.tsx
 ├── app/
-│   ├── app.tsx                     # каркас: header + main
-│   ├── app-providers.tsx           # ThemeProvider, GlobalStyle, QueryClientProvider
-│   └── query-client.ts             # единый QueryClient приложения (createQueryClient())
-├── widgets/org-tree/
-│   ├── org-tree-panel.tsx          # загрузка / ошибка / пусто / дерево
-│   ├── org-tree.tsx                # role="tree", buildOrgTree в useMemo
-│   ├── org-tree-item.tsx           # role="treeitem", memo, рекурсия
-│   ├── org-tree.styles.ts
-│   └── use-tree-expansion.ts       # состояние раскрытия
+│   ├── app.tsx                        # каркас: header + main
+│   ├── app-providers.tsx              # ThemeProvider, GlobalStyle, QueryClientProvider
+│   └── query-client.ts                # единый QueryClient приложения
+├── widgets/
+│   ├── org-dashboard/
+│   │   ├── org-dashboard.tsx          # загрузка / ошибка / пусто; split-view ≥1280px или переключатель; selectedId
+│   │   └── org-dashboard.styles.ts
+│   ├── org-tree/
+│   │   ├── org-tree.tsx               # role="tree"; раскрытие предков выбранного узла
+│   │   ├── org-tree-item.tsx          # role="treeitem", memo, aria-selected, scrollIntoView
+│   │   ├── org-tree.styles.ts
+│   │   └── use-tree-expansion.ts      # isExpanded / toggle / expand
+│   └── org-table/
+│       ├── org-table.tsx              # role="grid"; сортировка, фильтр (дебаунс 250 мс), выбор строки
+│       ├── org-table.styles.ts
+│       └── lib/
+│           ├── sort-rows.ts           # sortRows, applySortToggle
+│           └── filter-rows.ts         # filterRowsByName (регистр, ё ≡ е)
 ├── entities/org-node/
-│   ├── model/org-node.schema.ts    # zod-схема ответа + тип OrgNode
-│   ├── model/performance.ts        # пороги и уровни эффективности
-│   ├── lib/build-org-tree.ts       # плоский список → лес, O(n)
-│   ├── api/org-tree.api.ts         # fetchOrgTree(signal)
-│   ├── api/org-tree.query.ts       # orgTreeQueryKey, queryOptions, useOrgTreeQuery
+│   ├── model/org-node.schema.ts       # zod-схема ответа + тип OrgNode
+│   ├── model/performance.ts           # пороги и уровни эффективности
+│   ├── lib/build-org-tree.ts          # плоский список → лес, O(n)
+│   ├── lib/aggregate-org-tree.ts      # агрегаты поддеревьев, O(n), без рекурсии
+│   ├── lib/org-tree-model.ts          # forest + byId + stats + rows; getOrgTreeModel (WeakMap-мемо)
+│   ├── api/org-tree.api.ts            # fetchOrgTree(signal)
+│   ├── api/org-tree.query.ts          # useOrgTreeQuery, useOrgTreeModelQuery (select)
 │   └── ui/performance-indicator.tsx
 ├── shared/
-│   ├── api/http-client.ts          # getJson + ApiError
-│   ├── api/get-error-message.ts    # ApiError → текст для пользователя
-│   ├── api/query-client.ts         # createQueryClient(): staleTime 5 с, retry off, structuralSharing
-│   ├── styles/                     # theme, GlobalStyle, типизация DefaultTheme
-│   └── ui/                         # LoadingState, ErrorState, EmptyState, Button
-└── test/                           # setup, фикстуры, renderWithProviders
-                                    # в каждом каталоге модулей — __tests__/ с его тестами
+│   ├── api/                           # http-client, get-error-message, query-client
+│   ├── lib/                           # format, use-debounced-value, use-media-query, prefers-reduced-motion
+│   ├── styles/                        # theme, GlobalStyle, типизация DefaultTheme
+│   └── ui/                            # LoadingState, ErrorState, EmptyState, Button, Panel
+└── test/                              # setup, фикстуры, renderWithProviders, мок matchMedia
+                                       # в каждом каталоге модулей — __tests__/ с его тестами
 ```
 
 Тесты лежат в каталоге `__tests__/` рядом с тестируемыми модулями: `widgets/org-tree/__tests__/org-tree.test.tsx` проверяет `widgets/org-tree/org-tree.tsx`. Импорты в тестах только абсолютные (`@/…`), поэтому перенос файлов их не ломает.
@@ -403,41 +413,41 @@ client/src/
 
 ```mermaid
 sequenceDiagram
-    participant P as OrgTreePanel
-    participant H as useOrgTreeQuery
+    participant D as OrgDashboard
+    participant H as useOrgTreeModelQuery
     participant QC as TanStack QueryClient
-    participant F as fetchOrgTree
-    participant HC as getJson
-    participant S as orgTreeResponseSchema
+    participant F as fetchOrgTree + zod
+    participant M as getOrgTreeModel
     participant T as OrgTree
+    participant G as OrgTable
 
-    P->>H: useOrgTreeQuery()
-    H->>QC: useQuery({ queryKey: ['org-tree'], queryFn })
-    alt нет данных или прошло ≥ 5 с (staleTime)
-        QC->>F: queryFn({ signal })
-        F->>HC: GET /api/org-tree
-        HC->>S: safeParse(body)
-        alt ответ валиден
-            S-->>QC: OrgNode[]
-            QC->>QC: structural sharing:<br/>неизменённые узлы и массив сохраняют ссылки
-        else HTTP / сеть / JSON / схема
-            HC--xQC: ApiError(kind)
-        end
-        QC-->>H: уведомляет только об изменившихся полях
+    D->>H: useOrgTreeModelQuery()
+    H->>QC: useQuery({ queryKey: ['org-tree'], queryFn, select })
+    alt нет данных или прошло ≥ 5 с
+        QC->>F: queryFn({ signal }) → GET /api/org-tree
+        F-->>QC: OrgNode[] (валидный) или ApiError
+        QC->>QC: structural sharing
     else данные свежие
-        QC-->>H: данные из кэша, без запроса
+        QC-->>H: данные из кэша
     end
-    H-->>P: { data, error, isError, isFetching, refetch }
-    P->>T: nodes = data
-    T->>T: useMemo(buildOrgTree, [nodes])
+    QC->>M: select(data)
+    alt та же ссылка на data
+        M-->>QC: модель из WeakMap (без пересчёта)
+    else данные изменились
+        M->>M: buildOrgTree → aggregateOrgTree → rows (один раз)
+    end
+    H-->>D: { data: model, error, isError, isFetching, refetch }
+    D->>T: model, selectedId
+    D->>G: model.rows, selectedId, onSelect
+    G-->>D: onSelect(id) → setSelectedId
 ```
 
-1. **`OrgTreePanel`** вызывает `useOrgTreeQuery()`, то есть `useQuery(orgTreeQueryOptions)` с ключом `['org-tree']`.
-2. **TanStack Query** отправляет запрос, только если данных нет или они старше `staleTime` (5 с): при монтировании и при фокусе окна. Одновременные запросы объединяются, при фоновой перепроверке старые данные остаются на экране.
-3. **`queryFn`** передаёт `signal` из TanStack в `fetchOrgTree`. Когда компонентов, использующих запрос, не остаётся, TanStack отменяет запрос через этот `signal`.
-4. **`getJson`** выполняет `fetch` и сводит все сбои к `ApiError` с полем `kind`: `network`, `http`, `parse` или `validation`. Ответ проверяется **zod-схемой**: поля, типы, диапазоны, ISO-дата, уникальность `id`, существование родителя, отсутствие циклов. Невалидный ответ считается ошибкой, см. [ADR-002](adr/002-runtime-response-validation.md).
-5. **Structural sharing:** если ответ совпадает с прежним, ссылка на `data` не меняется. Если изменились отдельные узлы, новые ссылки получают только они и массив. Компонент перерисовывается, только если изменились поля результата, которые он читает. `buildOrgTree` в `useMemo` не пересчитывается без реальных изменений.
-6. **`OrgTree`** строит лес из плоского списка за O(n) и рендерит его рекурсивно.
+1. **`OrgDashboard`** вызывает `useOrgTreeModelQuery()`, то есть `useQuery` с ключом `['org-tree']` и `select: getOrgTreeModel`.
+2. **TanStack Query** отправляет запрос, только если данных нет или они старше `staleTime` (5 с): при монтировании и при фокусе окна. Одновременные запросы объединяются, при фоновой перепроверке старые данные остаются на экране. `signal` из `queryFn` отменяет запрос, когда компонентов, использующих запрос, не остаётся.
+3. **`getJson` + zod** проверяют ответ: невалидный ответ превращается в `ApiError(kind: 'validation')`, см. [ADR-002](adr/002-runtime-response-validation.md).
+4. **Structural sharing** сохраняет ссылку на `data`, если ответ не изменился.
+5. **`getOrgTreeModel`** мемоизирован по ссылке на `data` через `WeakMap`. Дерево, агрегаты и строки таблицы вычисляются **один раз на каждое реальное изменение данных** и переиспользуются всеми потребителями, см. [ADR-004](adr/004-aggregation-and-memoization.md).
+6. **`OrgDashboard`** передаёт одну и ту же модель в `OrgTree` (лес) и `OrgTable` (строки) и хранит общее `selectedId`.
 
 ### Кэш запросов (TanStack Query)
 
@@ -452,31 +462,65 @@ sequenceDiagram
 | Кэш меняется только при реальном изменении данных | `structuralSharing: true`: равные данные сохраняют ссылку, изменённые узлы получают новые ссылки, остальные — прежние |
 | Ошибки | `retry: false`: ошибка сразу показывается пользователю, повтор по кнопке «Повторить» (`refetch`); ранее загруженные `data` сохраняются |
 
-Каждое из этих требований закреплено тестом в `entities/org-node/api/__tests__/org-tree.query.test.tsx`. Если выключить `structuralSharing`, падают 4 теста, то есть тесты действительно проверяют это поведение.
+Каждое из этих требований закреплено тестом в `entities/org-node/api/__tests__/org-tree.query.test.tsx`. Если выключить `structuralSharing`, падают 4 теста, а если убрать мемоизацию модели — 2 теста.
 
-### Состояния UI (`OrgTreePanel`)
+### Агрегация
+
+Суммарные показатели включают узел и всех его потомков. Алгоритм, формулы и сложность описаны в [`data-model.md`](data-model.md).
+
+| Показатель | Формула по поддереву |
+|---|---|
+| Всего сотрудников | Σ `headcount` |
+| Бюджет суммарный | Σ `budget` |
+| Средняя эффективность | Σ(`performance` × `headcount`) / Σ `headcount`; если Σ `headcount` = 0, то простое среднее `performance` |
+
+### Состояния UI (`OrgDashboard`)
 
 | Условие | Что показывается |
 |---|---|
 | Нет `data`, идёт запрос (в том числе повтор после ошибки) | `LoadingState` (`role="status"`, `aria-busy`) |
 | Нет `data`, `isError`, запрос не идёт | `ErrorState` (`role="alert"`) с понятным текстом из `getErrorMessage` и кнопкой «Повторить» |
-| `data = []` | `EmptyState` «Подразделений пока нет» |
-| `data` есть | `OrgTree` |
-| `data` есть, фоновая перепроверка упала | Дерево остаётся на экране, сверху компактный `ErrorState` «Не удалось обновить данные» с «Повторить» |
+| `data = []` | `EmptyState` «Подразделений пока нет» (без переключателя и таблицы) |
+| `data` есть | Дерево и таблица: рядом при ширине ≥ 1280px, иначе по переключателю |
+| `data` есть, фоновая перепроверка упала | Контент остаётся, сверху компактный `ErrorState` «Не удалось обновить данные» с «Повторить» |
+
+### Раскладка
+
+- **≥ 1280px** (`SPLIT_VIEW_MEDIA_QUERY`): split-view, дерево и таблица рядом (сетка 1 : 2). Каждая панель прокручивается внутри себя.
+- **< 1280px:** переключатель «Дерево / Таблица» (`role="group"`, кнопки с `aria-pressed`), показывается одна панель, по умолчанию дерево.
+- Ширина отслеживается через `useMediaQuery` (`useSyncExternalStore` + `matchMedia`), раскладка перестраивается при ресайзе окна.
+- Выбранный узел хранится в `OrgDashboard` и не сбрасывается при смене режима. Выбирать можно и в таблице, и в дереве; выбор виден в другой панели после переключения.
 
 ### Дерево
 
-- **Доступность:** `role="tree"` → `treeitem` (`aria-level`, `aria-expanded` только у узлов с детьми, имя через `aria-labelledby`) → `group`. Узлы раскрываются нативной `<button>` с `aria-label` «Развернуть / Свернуть «…»», поэтому работают Enter и Space.
+- **Доступность:** `role="tree"` → `treeitem` (`aria-level`, `aria-expanded` только у узлов с детьми, `aria-selected`, имя через `aria-labelledby`) → `group`. Узлы раскрываются нативной `<button>` с `aria-label` «Развернуть / Свернуть «…»», поэтому работают Enter и Space.
 - **Узел** показывает `name`, `headcount` (собственный, из API) и `PerformanceIndicator` — цветную точку с `role="img"` и подписью «Эффективность 82 из 100 — высокая» (цвет не единственный носитель информации).
-- **Уровни эффективности** (`model/performance.ts`): `≥ 80` — высокая (зелёный), `60–79` — средняя (янтарный), `< 60` — низкая (красный). Цвета заданы в теме.
-- **Раскрытие по умолчанию:** развёрнут первый уровень, так что второй уровень (отделы) виден сразу, см. [ADR-003](adr/003-tree-default-expansion.md). Состояние хранится как пользовательские переключения поверх значения по умолчанию, поэтому при обновлении данных раскрытые ветки не сворачиваются.
-- **Производительность:** `buildOrgTree` мемоизирован по ссылке на `data`, `OrgTreeItem` обёрнут в `memo`, дочерние узлы свёрнутой ветки не монтируются.
+- **Уровни эффективности** (`model/performance.ts`): `≥ 80` — высокая (зелёный), `60–79` — средняя (янтарный), `< 60` — низкая (красный). Уровень считается по точному значению, в подписи агрегатов один знак после запятой.
+- **Раскрытие по умолчанию:** развёрнут первый уровень, так что второй уровень (отделы) виден сразу, см. [ADR-003](adr/003-tree-default-expansion.md).
+- **Клик по элементу дерева:** кликабельна вся строка узла. Для узла с детьми клик раскрывает или сворачивает ветку и одновременно выбирает узел (строка подсвечивается в таблице); для листа — только выбирает. Стрелка только раскрывает или сворачивает (`stopPropagation`, без выбора). Название рендерится как `<button>`, поэтому то же действие доступно с клавиатуры: Tab + Enter.
+- **Выделение из таблицы:** когда меняется `selectedId`, `OrgTree` раскрывает всех предков узла прямо во время рендера (без мелькания скрытого узла), а строка прокручивается в зону видимости через `scrollIntoView({ block: 'nearest' })`. При `prefers-reduced-motion` прокрутка без анимации. Пользователь может свернуть ветку и после выбора; повторный выбор узла снова её раскроет.
+- **Производительность:** модель мемоизирована, `OrgTreeItem` обёрнут в `memo`, дочерние узлы свёрнутой ветки не монтируются.
+
+### Таблица
+
+| Возможность | Реализация |
+|---|---|
+| Столбцы | Подразделение · Уровень · Всего сотрудников · Бюджет суммарный · Средняя эффективность |
+| Порядок по умолчанию | Иерархический (обход в глубину, как в дереве) |
+| Сортировка | Клик по новому столбцу — по возрастанию; **повторный клик по активному столбцу или двойной клик — обратный порядок**. Второй клик в составе двойного (`event.detail > 1`) игнорируется, поэтому двойной клик перестраивает таблицу ровно один раз. Одинаковые значения остаются в иерархическом порядке (стабильная сортировка). Названия сравниваются через `Intl.Collator('ru')` |
+| Клавиатура | Заголовки — нативные кнопки: Enter и Space работают как клик (сортировка, повторно — обратный порядок). `aria-sort` на `<th>` |
+| Фильтр по названию | Поиск в реальном времени с дебаунсом **250 мс** (`useDebouncedValue`); подстрока без учёта регистра, ё ≡ е; работает вместе с сортировкой; счётчик «Показано N из M» (`aria-live`); сообщение, если ничего не найдено |
+| Клик по строке | `onSelect(id)` → узел выделяется в дереве; строка подсвечивается (`aria-selected`). Если узел выбран в дереве, строка прокручивается в зону видимости (`scrollIntoView({ block: 'nearest' })`) |
+| Форматы | Бюджет: `12 345 678 руб.` (обычные пробелы между разрядами); сотрудники: `1 234`; эффективность: один знак после запятой, `63,5`, плюс цветной индикатор |
+| Производительность | `useMemo(sortRows(filterRowsByName(rows, query), sort))`; строки — `memo`-компонент `TableRow`. Замер в браузере на 44 строках: от клика до обновления DOM 1–3 мс |
+
+`role="grid"` выбран с расчётом на этап 03: там добавится навигация по таблице стрелками, Home/End и Enter.
 
 ### Стили
 
 - Все стили задаются через styled-components и тему (`shared/styles/theme.ts`), типизация — через `DefaultTheme`.
-- Динамические значения передаются transient-пропсами (`$level`, `$expanded`) и превращаются в классы, а не в атрибут `style`.
-- **Inline-CSS запрещён**, и это проверяется тестами. `src/test/no-inline-styles.test.ts` сканирует исходники `.tsx` на `style={`, а тесты компонентов проверяют, что в DOM нет атрибутов `[style]`.
+- Динамические значения передаются transient-пропсами (`$level`, `$expanded`, `$selected`, `$direction`) и превращаются в классы, а не в атрибут `style`.
+- **Inline-CSS запрещён**, и это проверяется тестами. `src/test/__tests__/no-inline-styles.test.ts` сканирует исходники `.tsx` на `style={`, а тесты компонентов проверяют, что в DOM нет атрибутов `[style]`.
 - `GlobalStyle` содержит reset, шрифты, `:focus-visible` и отключает анимации при `prefers-reduced-motion`.
 
 ### Абсолютные импорты
@@ -492,15 +536,23 @@ import { OrgTree } from '@/widgets/org-tree/org-tree'
 
 ### Тестирование (TDD)
 
-Разработка шла циклами **red → green → refactor**: сначала тесты на поведение, потом реализация.
+Разработка идёт циклами **red → green → refactor**: сначала тесты на поведение, потом реализация.
 
 | Цикл | Модули | Что проверяется |
 |---|---|---|
 | A. Домен и API | `performance`, `org-node.schema`, `build-org-tree`, `http-client`, `org-tree.api` | Границы уровней; все правила схемы, включая уникальность, родителей и циклы, а также отбрасывание лишних полей; вложенность, уровни, порядок, неизменность входа; ошибки `network`/`http`/`parse`/`validation`; проброс отмены |
-| B. Кэш (TanStack Query) | `query-client`, `org-tree.query` | Настройки проекта (staleTime 5 с, `retry: false`, focus, structural sharing); pending → success; невалидный ответ → `ApiError` без повторов; один запрос под StrictMode; кэш при повторном монтировании; фоновая перепроверка устаревших данных; равный ответ → та же ссылка и нет перерисовки; изменённый ответ → новые ссылки только у изменённых узлов; отмена при unmount |
-| C. UI | `status-states`, `performance-indicator`, `use-tree-expansion`, `org-tree`, `org-tree-panel`, `app`, `app-providers`, `no-inline-styles` | ARIA-роли и атрибуты; второй уровень виден по умолчанию; name/headcount/индикатор; раскрытие и сворачивание мышью и клавиатурой; сохранение раскрытия при обновлении; загрузка, пустой ответ, ошибка → повтор (со спиннером во время повтора); невалидная схема → ошибка; устаревшие данные + предупреждение; отмена при unmount; отсутствие inline-CSS |
+| B. Кэш (TanStack Query) | `query-client`, `org-tree.query` | Настройки проекта; pending → success; невалидный ответ → `ApiError` без повторов; один запрос под StrictMode; кэш при повторном монтировании; фоновая перепроверка; равный ответ → та же ссылка и нет перерисовки; изменённый ответ → новые ссылки только у изменённых узлов; отмена при unmount; модель считается один раз и общая для нескольких потребителей |
+| C. UI этапа 01 | `status-states`, `performance-indicator`, `use-tree-expansion`, `org-tree`, `app`, `app-providers`, `no-inline-styles` | ARIA-роли; второй уровень виден по умолчанию; name/headcount/индикатор; раскрытие мышью и клавиатурой; сохранение раскрытия при обновлении; отсутствие inline-CSS |
+| D. Логика этапа 02 | `format`, `aggregate-org-tree`, `org-tree-model`, `sort-rows`, `filter-rows`, `use-debounced-value`, `use-media-query` | Формат `12 345 678 руб.`; суммы по поддереву; взвешенная эффективность и случай без сотрудников; глубина 20 000 без переполнения стека; строки в порядке обхода в глубину; мемоизация по ссылке; предки узла; сортировка всех столбцов, стабильность, русская сортировка названий; клик / двойной клик; фильтр (регистр, ё ≡ е, пробелы); дебаунс с перезапуском таймера; media query с подпиской и отпиской, SSR |
+| E. UI этапа 02 | `org-table`, `org-tree` (клик по элементу, выделение), `org-dashboard` | Раскрытие ветки кликом по всей строке, ровно одно переключение при клике по названию или стрелке, выбор листа без раскрытия; столбцы и форматы; сортировка: клик, повторный клик, двойной клик ровно с одной перестройкой, клавиатура; фильтр ровно через 250 мс и вместе с сортировкой; «ничего не найдено»; выбор и подсветка строки; раскрытие предков, `aria-selected`, `scrollIntoView` (с учётом reduced motion); split-view ≥1280px и переключатель ниже, реакция на ресайз; синхронизация выбора в обе стороны (таблица → дерево, дерево → таблица) в обоих режимах; прокрутка строки таблицы к узлу, выбранному в дереве; состояния загрузки, ошибки, пустого ответа и отмены; агрегация один раз для дерева и таблицы |
 
-Покрытие: **100%** строк и функций, 98.7% веток. В `vitest.config.ts` пакет `styled-components` подменён на его browser-сборку: Node-сборка не вставляет `createGlobalStyle` в DOM, и без подмены тесты не соответствовали бы поведению в браузере.
+Покрытие: **100%** строк, функций и statements, 99.3% веток. Мутационная проверка: без `structuralSharing` падают 4 теста, без мемоизации модели — 2, без игнорирования второго клика двойного клика — 2, без `stopPropagation` у стрелки — 7.
+
+Особенности тестового окружения:
+
+- `styled-components` подменён на browser-сборку: Node-сборка не вставляет `createGlobalStyle` в DOM.
+- `window.matchMedia` в jsdom нет, поэтому используется мок `test/match-media.ts` с управляемой шириной окна (`mockMatchMedia`, `resizeViewport`).
+- Дебаунс проверяется на фейковых таймерах через `fireEvent`: асинхронная обёртка Testing Library ждёт реальный `setTimeout`, который под фейковыми таймерами Vitest не срабатывает.
 
 | Скрипт | Действие |
 |---|---|

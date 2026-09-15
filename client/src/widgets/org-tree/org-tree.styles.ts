@@ -16,16 +16,21 @@ export const Item = styled.li`
   margin: 0;
 `
 
-export const Row = styled.div<{ $level: number }>`
+export const Row = styled.div<{ $level: number; $selected: boolean; $interactive: boolean }>`
   display: flex;
   align-items: center;
   gap: 8px;
   min-height: ${({ theme }) => theme.tree.rowHeightPx}px;
   padding: 4px 12px 4px ${({ theme, $level }) => 8 + ($level - 1) * theme.tree.indentPx}px;
   border-radius: ${({ theme }) => theme.radii.sm};
+  background: ${({ theme, $selected }) => ($selected ? theme.colors.selected : 'transparent')};
+  box-shadow: ${({ theme, $selected }) => ($selected ? `inset 3px 0 0 ${theme.colors.accent}` : 'none')};
+  scroll-margin: 8px;
+  cursor: ${({ $interactive }) => ($interactive ? 'pointer' : 'default')};
+  user-select: none;
 
   &:hover {
-    background: ${({ theme }) => theme.colors.surfaceHover};
+    background: ${({ theme, $selected }) => ($selected ? theme.colors.selected : theme.colors.surfaceHover)};
   }
 `
 
@@ -69,6 +74,15 @@ export const Name = styled.span`
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+
+  /* Rendered as a button when the tree is selectable (keyboard access); looks like plain text. */
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: inherit;
 `
 
 export const Headcount = styled.span`

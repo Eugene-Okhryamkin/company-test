@@ -7,6 +7,7 @@ export const theme = {
     text: '#0f172a',
     textMuted: '#64748b',
     accent: '#2563eb',
+    selected: '#eff6ff',
     focus: '#93c5fd',
     danger: '#b91c1c',
     dangerSurface: '#fef2f2',
