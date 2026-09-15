@@ -1,0 +1,26 @@
+name: staff-pulse
+
+services:
+  backend:
+    build:
+      context: ./backend
+    image: staff-pulse-backend
+    environment:
+      NODE_ENV: production
+      PORT: 8080
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    init: true
+    restart: unless-stopped
+
+  client:
+    build:
+      context: ./client
+    image: staff-pulse-client
+    environment:
+      API_UPSTREAM: http://backend:8080
+    ports:
+      - "${CLIENT_PORT:-5173}:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
