@@ -16,14 +16,39 @@ describe('parsePort', () => {
 
 describe('loadConfig', () => {
   it('uses defaults for an empty environment', () => {
-    expect(loadConfig({})).toEqual({ port: 8080, host: undefined, env: 'development' });
+    expect(loadConfig({})).toEqual({
+      port: 8080,
+      host: undefined,
+      env: 'development',
+      liveUpdates: { enabled: true, intervalMs: 3000, maxNodesPerTick: 3, heartbeatIntervalMs: 15000 },
+    });
   });
 
-  it('reads PORT, HOST and NODE_ENV', () => {
-    expect(loadConfig({ PORT: '9000', HOST: '127.0.0.1', NODE_ENV: 'production' })).toEqual({
+  it('reads PORT, HOST, NODE_ENV and live update settings', () => {
+    expect(
+      loadConfig({
+        PORT: '9000',
+        HOST: '127.0.0.1',
+        NODE_ENV: 'production',
+        LIVE_UPDATES_ENABLED: 'false',
+        LIVE_UPDATE_INTERVAL_MS: '1000',
+        LIVE_UPDATE_MAX_NODES: '5',
+        LIVE_HEARTBEAT_INTERVAL_MS: '20000',
+      }),
+    ).toEqual({
       port: 9000,
       host: '127.0.0.1',
       env: 'production',
+      liveUpdates: { enabled: false, intervalMs: 1000, maxNodesPerTick: 5, heartbeatIntervalMs: 20000 },
     });
+  });
+
+  it.each([
+    [{ LIVE_UPDATE_INTERVAL_MS: 'soon' }, 'intervalMs', 3000],
+    [{ LIVE_UPDATE_INTERVAL_MS: '10' }, 'intervalMs', 250],
+    [{ LIVE_UPDATE_MAX_NODES: '0' }, 'maxNodesPerTick', 1],
+    [{ LIVE_HEARTBEAT_INTERVAL_MS: '-5' }, 'heartbeatIntervalMs', 15000],
+  ] as const)('sanitises %j', (env, key, expected) => {
+    expect(loadConfig(env).liveUpdates[key]).toBe(expected);
   });
 });

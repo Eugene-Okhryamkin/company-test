@@ -34,6 +34,16 @@ describe('getJson', () => {
     })
   })
 
+  it('hands the successful response to onResponse (e.g. to read headers)', async () => {
+    fetchMock.mockResolvedValue(jsonResponse([{ id: 'a' }], { headers: { 'X-Data-Version': '9' } }))
+    const onResponse = vi.fn()
+
+    await getJson('/api/x', schema, { onResponse })
+
+    expect(onResponse).toHaveBeenCalledTimes(1)
+    expect(onResponse.mock.calls[0]![0].headers.get('X-Data-Version')).toBe('9')
+  })
+
   it('throws an http ApiError for non-2xx responses', async () => {
     fetchMock.mockResolvedValue(jsonResponse({ error: 'Internal Server Error' }, { status: 500 }))
 

@@ -6,6 +6,9 @@ import { createAppContainer } from '@/di/container.js';
 import { OrgNodeMapper } from '@/mappers/org-node.mapper.js';
 import { InMemoryOrgNodeRepository } from '@/repositories/org-node.repository.js';
 import { orgNodesSeed } from '@/seeds/org-nodes.seed.js';
+import { OrgTreeChangeBus } from '@/events/org-tree-change-bus.js';
+import { LiveUpdatesGateway } from '@/gateways/live-updates.gateway.js';
+import { LiveUpdateSimulator } from '@/services/live-update-simulator.js';
 import { OrgTreeService } from '@/services/org-tree.service.js';
 import { makeNode } from '@tests/helpers/org-node.factory.js';
 
@@ -16,7 +19,19 @@ describe('createAppContainer', () => {
     const container = createAppContainer(config);
 
     expect(Object.keys(container.registrations).sort()).toEqual(
-      ['config', 'orgNodeMapper', 'orgNodeRepository', 'orgNodesSeed', 'orgTreeController', 'orgTreeService'],
+      [
+        'clock',
+        'config',
+        'liveUpdateSimulator',
+        'liveUpdatesGateway',
+        'orgNodeMapper',
+        'orgNodeRepository',
+        'orgNodesSeed',
+        'orgTreeChangeBus',
+        'orgTreeController',
+        'orgTreeService',
+        'random',
+      ],
     );
   });
 
@@ -29,6 +44,30 @@ describe('createAppContainer', () => {
     expect(container.resolve('orgNodeMapper')).toBeInstanceOf(OrgNodeMapper);
     expect(container.resolve('orgTreeService')).toBeInstanceOf(OrgTreeService);
     expect(container.resolve('orgTreeController')).toBeInstanceOf(OrgTreeController);
+    expect(container.resolve('orgTreeChangeBus')).toBeInstanceOf(OrgTreeChangeBus);
+    expect(container.resolve('liveUpdateSimulator')).toBeInstanceOf(LiveUpdateSimulator);
+    expect(container.resolve('liveUpdatesGateway')).toBeInstanceOf(LiveUpdatesGateway);
+    expect(container.resolve('random')).toBe(Math.random);
+    expect(container.resolve('clock')()).toBeInstanceOf(Date);
+  });
+
+  it('shares one change bus between the service and the gateway', () => {
+    const container = createAppContainer(config);
+    const bus = container.resolve('orgTreeChangeBus');
+    expect(container.resolve('orgTreeChangeBus')).toBe(bus);
+  });
+
+  it('stops the simulator and closes the gateway when the container is disposed', async () => {
+    const container = createAppContainer(config);
+    const simulator = container.resolve('liveUpdateSimulator');
+    const gateway = container.resolve('liveUpdatesGateway');
+    const close = vi.spyOn(gateway, 'close');
+    simulator.start();
+
+    await container.dispose();
+
+    expect(simulator.isRunning).toBe(false);
+    expect(close).toHaveBeenCalledTimes(1);
   });
 
   it('shares singletons across resolutions', () => {
@@ -46,7 +85,8 @@ describe('createAppContainer', () => {
 
   it('wires the service to the repository built from the seed', async () => {
     const service = createAppContainer(config).resolve('orgTreeService');
-    await expect(service.getFlatTree()).resolves.toHaveLength(orgNodesSeed.length);
+    await expect(service.getSnapshot()).resolves.toMatchObject({ version: 0, nodes: expect.any(Array) });
+    expect((await service.getSnapshot()).nodes).toHaveLength(orgNodesSeed.length);
   });
 
   it('lets a registration be overridden before resolution', async () => {
@@ -54,12 +94,12 @@ describe('createAppContainer', () => {
     const nodes = [makeNode({ id: 'only' })];
     container.register('orgNodesSeed', asValue(nodes));
 
-    await expect(container.resolve('orgTreeService').getFlatTree()).resolves.toEqual(nodes);
+    await expect(container.resolve('orgTreeService').getSnapshot()).resolves.toEqual({ version: 0, nodes });
   });
 
   it('injects an overridden service into the controller', () => {
     const container = createAppContainer(config);
-    const stub = { getFlatTree: vi.fn() };
+    const stub = { getSnapshot: vi.fn(), getVersion: vi.fn(), applyChanges: vi.fn() };
     container.register('orgTreeService', asValue(stub));
 
     const controller = container.resolve('orgTreeController');

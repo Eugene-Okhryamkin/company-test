@@ -4,8 +4,8 @@ import { afterEach, beforeEach } from 'vitest'
 import { mockMatchMedia } from '@/test/match-media'
 
 beforeEach(() => {
-  // jsdom has no matchMedia; default to a narrow viewport. Tests can switch it via mockMatchMedia().
-  mockMatchMedia({ width: 1024 })
+  // jsdom has no matchMedia: narrow viewport, reduced motion on (animations settle instantly).
+  mockMatchMedia({ width: 1024, reducedMotion: true })
 })
 
 afterEach(() => {

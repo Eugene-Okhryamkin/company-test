@@ -4,6 +4,8 @@ import { StrictMode, type ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { orgTreeQueryKey, useOrgTreeModelQuery, useOrgTreeQuery } from '@/entities/org-node/api/org-tree.query'
 import * as aggregateModule from '@/entities/org-node/lib/aggregate-org-tree'
+import { getDataVersion } from '@/entities/org-node/live/data-version'
+import type { OrgNode } from '@/entities/org-node/model/org-node.schema'
 import { ApiError } from '@/shared/api/http-client'
 import { createQueryClient } from '@/shared/api/query-client'
 import { makeOrgNode, sampleOrgNodes } from '@/test/fixtures'
@@ -144,6 +146,22 @@ describe('useOrgTreeQuery', () => {
     unmount()
 
     await waitFor(() => expect(signal?.aborted).toBe(true))
+  })
+
+  it('keeps the data version when a refetch returns identical data', async () => {
+    fetchMock
+      .mockResolvedValueOnce(Response.json(sampleOrgNodes, { headers: { 'X-Data-Version': '1' } }))
+      .mockResolvedValueOnce(Response.json(sampleOrgNodes, { headers: { 'X-Data-Version': '2' } }))
+    const { result } = renderHook(() => useOrgTreeQuery(), { wrapper })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    const before = client.getQueryData<OrgNode[]>(orgTreeQueryKey)!
+
+    await act(() => client.refetchQueries({ queryKey: orgTreeQueryKey }))
+    await waitFor(() => expect(client.getQueryState(orgTreeQueryKey)?.dataUpdateCount).toBe(2))
+
+    const after = client.getQueryData<OrgNode[]>(orgTreeQueryKey)!
+    expect(after).toBe(before)
+    expect(getDataVersion(after)).toBe(2)
   })
 
   describe('useOrgTreeModelQuery', () => {

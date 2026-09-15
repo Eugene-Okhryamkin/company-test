@@ -42,4 +42,22 @@ describe('OrgNodeMapper', () => {
     const dtos = mapper.toDtoList([makeNode({ id: 'a' }), makeNode({ id: 'b' })]);
     expect(dtos.map((d) => d.id)).toEqual(['a', 'b']);
   });
+
+  it('maps updated nodes to a live patch message', () => {
+    const node = makeNode({
+      id: 'd1-1',
+      name: 'Платформа',
+      parentId: 'd1',
+      headcount: 4,
+      budget: 6_300_000,
+      performance: 86.5,
+      updatedAt: new Date('2026-09-15T10:00:00.000Z'),
+    });
+
+    expect(mapper.toPatchMessage({ version: 7, nodes: [node] })).toStrictEqual({
+      type: 'patch',
+      version: 7,
+      nodes: [{ id: 'd1-1', headcount: 4, budget: 6_300_000, performance: 86.5, updatedAt: '2026-09-15T10:00:00.000Z' }],
+    });
+  });
 });

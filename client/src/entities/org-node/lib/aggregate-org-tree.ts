@@ -1,4 +1,5 @@
 import type { OrgTreeNode } from '@/entities/org-node/lib/build-org-tree'
+import type { OrgNode } from '@/entities/org-node/model/org-node.schema'
 
 /** Totals for a node together with all of its descendants. */
 export interface OrgUnitStats {
@@ -11,6 +12,35 @@ export interface OrgUnitStats {
   /** Σ performance — for the zero-headcount fallback. */
   performanceSum: number
   nodeCount: number
+}
+
+/**
+ * Stats of one node from its own values and its children's stats. Shared by the full and the
+ * incremental aggregation, so both produce bit-identical results.
+ */
+export function computeUnitStats(node: OrgNode, childStats: readonly OrgUnitStats[]): OrgUnitStats {
+  let totalHeadcount = node.headcount
+  let totalBudget = node.budget
+  let performanceWeight = node.performance * node.headcount
+  let performanceSum = node.performance
+  let nodeCount = 1
+
+  for (const child of childStats) {
+    totalHeadcount += child.totalHeadcount
+    totalBudget += child.totalBudget
+    performanceWeight += child.performanceWeight
+    performanceSum += child.performanceSum
+    nodeCount += child.nodeCount
+  }
+
+  return {
+    totalHeadcount,
+    totalBudget,
+    avgPerformance: totalHeadcount > 0 ? performanceWeight / totalHeadcount : performanceSum / nodeCount,
+    performanceWeight,
+    performanceSum,
+    nodeCount,
+  }
 }
 
 /**
@@ -31,29 +61,7 @@ export function aggregateOrgTree(forest: readonly OrgTreeNode[]): Map<string, Or
   // Reverse pre-order visits children before their parent.
   for (let index = preOrder.length - 1; index >= 0; index -= 1) {
     const { node, children } = preOrder[index]!
-    let totalHeadcount = node.headcount
-    let totalBudget = node.budget
-    let performanceWeight = node.performance * node.headcount
-    let performanceSum = node.performance
-    let nodeCount = 1
-
-    for (const child of children) {
-      const childStats = stats.get(child.node.id)!
-      totalHeadcount += childStats.totalHeadcount
-      totalBudget += childStats.totalBudget
-      performanceWeight += childStats.performanceWeight
-      performanceSum += childStats.performanceSum
-      nodeCount += childStats.nodeCount
-    }
-
-    stats.set(node.id, {
-      totalHeadcount,
-      totalBudget,
-      avgPerformance: totalHeadcount > 0 ? performanceWeight / totalHeadcount : performanceSum / nodeCount,
-      performanceWeight,
-      performanceSum,
-      nodeCount,
-    })
+    stats.set(node.id, computeUnitStats(node, children.map((child) => stats.get(child.node.id)!)))
   }
 
   return stats

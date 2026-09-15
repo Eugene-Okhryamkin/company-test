@@ -20,15 +20,17 @@ export const isAbortError = (error: unknown): boolean =>
 const formatIssues = (error: z.ZodError): string =>
   error.issues.map((issue) => `${issue.path.join('.') || '(root)'}: ${issue.message}`).join('; ')
 
+export interface GetJsonOptions {
+  signal?: AbortSignal
+  /** Called with a successful (2xx) response before the body is read — e.g. to read headers. */
+  onResponse?: (response: Response) => void
+}
+
 /**
  * GET a JSON resource and validate it against a schema.
  * Every failure becomes an ApiError, except aborts which are rethrown as-is.
  */
-export async function getJson<T>(
-  url: string,
-  schema: z.ZodType<T>,
-  { signal }: { signal?: AbortSignal } = {},
-): Promise<T> {
+export async function getJson<T>(url: string, schema: z.ZodType<T>, { signal, onResponse }: GetJsonOptions = {}): Promise<T> {
   let response: Response
   try {
     response = await fetch(url, { signal, headers: { Accept: 'application/json' } })
@@ -40,6 +42,8 @@ export async function getJson<T>(
   if (!response.ok) {
     throw new ApiError('http', `Request failed with status ${response.status}`, { status: response.status })
   }
+
+  onResponse?.(response)
 
   let body: unknown
   try {

@@ -58,6 +58,20 @@ describe('GET /api/org-tree', () => {
     expect(second.text).toBe('');
   });
 
+  it('exposes the data version so clients can align with live patches', async () => {
+    const { app, container } = createTestApp();
+
+    const before = await request(app).get('/api/org-tree');
+    expect(before.headers['x-data-version']).toBe('0');
+
+    await container.resolve('orgTreeService').applyChanges([{ id: 'd1', fields: { headcount: 99 } }]);
+    const after = await request(app).get('/api/org-tree');
+
+    expect(after.headers['x-data-version']).toBe('1');
+    expect(after.headers.etag).not.toBe(before.headers.etag);
+    expect(after.body.find((n: { id: string }) => n.id === 'd1').headcount).toBe(99);
+  });
+
   it('changes the ETag when the data changes', async () => {
     const a = await request(appWith([makeNode({ id: 'a', headcount: 1 })])).get('/api/org-tree');
     const b = await request(appWith([makeNode({ id: 'a', headcount: 2 })])).get('/api/org-tree');
@@ -78,7 +92,7 @@ describe('GET /api/org-tree', () => {
   it('responds 500 when the injected service fails unexpectedly', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const { app } = createTestApp({
-      orgTreeService: { getFlatTree: vi.fn().mockRejectedValue(new Error('boom')) },
+      orgTreeService: { getSnapshot: vi.fn().mockRejectedValue(new Error('boom')), getVersion: () => 0, applyChanges: vi.fn() },
     });
 
     const res = await request(app).get('/api/org-tree');

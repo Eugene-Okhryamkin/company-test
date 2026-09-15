@@ -104,7 +104,14 @@ export const Cell = styled.td<{ $align: 'start' | 'end' }>`
   padding: 8px 10px;
   border-bottom: 1px solid ${({ theme }) => theme.colors.border};
   white-space: nowrap;
+  /* keep the focused cell clear of the sticky header when the browser scrolls it into view */
+  scroll-margin-top: 48px;
   ${alignment}
+
+  &:focus-visible {
+    outline: 2px solid ${({ theme }) => theme.colors.accent};
+    outline-offset: -2px;
+  }
 `
 
 export const PerformanceValue = styled.span`

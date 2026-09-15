@@ -2,6 +2,8 @@ import { memo, useEffect, useId, useRef } from 'react'
 import type { OrgTreeNode } from '@/entities/org-node/lib/build-org-tree'
 import { PerformanceIndicator } from '@/entities/org-node/ui/performance-indicator'
 import { prefersReducedMotion } from '@/shared/lib/prefers-reduced-motion'
+import { Collapse } from '@/shared/ui/collapse'
+import { FlashOnChange } from '@/shared/ui/flash-on-change'
 import { Group, Headcount, Item, Name, Row, Toggle, ToggleSpacer } from '@/widgets/org-tree/org-tree.styles'
 
 interface OrgTreeItemProps {
@@ -77,23 +79,27 @@ export const OrgTreeItem = memo(function OrgTreeItem({
         ) : (
           <Name id={labelId}>{node.name}</Name>
         )}
-        <Headcount>{node.headcount} чел.</Headcount>
+        <Headcount>
+          <FlashOnChange value={node.headcount}>{node.headcount} чел.</FlashOnChange>
+        </Headcount>
         <PerformanceIndicator value={node.performance} />
       </Row>
 
-      {expanded && (
-        <Group role="group">
-          {children.map((child) => (
-            <OrgTreeItem
-              key={child.node.id}
-              treeNode={child}
-              selectedId={selectedId}
-              isExpanded={isExpanded}
-              onToggle={onToggle}
-              onSelect={onSelect}
-            />
-          ))}
-        </Group>
+      {hasChildren && (
+        <Collapse open={expanded}>
+          <Group role="group">
+            {children.map((child) => (
+              <OrgTreeItem
+                key={child.node.id}
+                treeNode={child}
+                selectedId={selectedId}
+                isExpanded={isExpanded}
+                onToggle={onToggle}
+                onSelect={onSelect}
+              />
+            ))}
+          </Group>
+        </Collapse>
       )}
     </Item>
   )

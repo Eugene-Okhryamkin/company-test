@@ -7,7 +7,8 @@ export class OrgTreeIntegrityError extends Error {
   }
 }
 
-function validateFields(node: OrgNode): void {
+/** Field-level rules of a single node (no tree context). */
+export function validateOrgNodeFields(node: OrgNode): void {
   const ref = `node "${node.id}"`;
 
   if (typeof node.id !== 'string' || node.id.trim() === '') {
@@ -38,7 +39,7 @@ export function validateOrgNodes(nodes: readonly OrgNode[]): void {
   const parentById = new Map<string, string | null>();
 
   for (const node of nodes) {
-    validateFields(node);
+    validateOrgNodeFields(node);
     if (parentById.has(node.id)) {
       throw new OrgTreeIntegrityError(`duplicate id "${node.id}"`);
     }

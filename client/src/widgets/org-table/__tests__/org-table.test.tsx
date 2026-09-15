@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildOrgTreeModel } from '@/entities/org-node/lib/org-tree-model'
 import { FILTER_DEBOUNCE_MS, OrgTable } from '@/widgets/org-table/org-table'
 import { sampleOrgNodes } from '@/test/fixtures'
+import { mockMatchMedia } from '@/test/match-media'
 import { inlineStyled, renderWithProviders } from '@/test/render'
 
 const { rows } = buildOrgTreeModel(sampleOrgNodes)
@@ -264,14 +265,9 @@ describe('OrgTable', () => {
     })
 
     it('scrolls without animation when the user prefers reduced motion', () => {
-      const original = window.matchMedia
-      window.matchMedia = (query: string) => ({ ...original(query), matches: query.includes('prefers-reduced-motion') })
-      try {
-        renderTable({ selectedId: 'd2' })
-        expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', behavior: 'auto' })
-      } finally {
-        window.matchMedia = original
-      }
+      mockMatchMedia({ reducedMotion: true })
+      renderTable({ selectedId: 'd2' })
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', behavior: 'auto' })
     })
 
     it('highlights the selected row', () => {
@@ -280,6 +276,156 @@ describe('OrgTable', () => {
       const selected = within(table()).getAllByRole('row', { selected: true })
       expect(selected).toHaveLength(1)
       expect(selected[0]).toHaveTextContent('Продажи')
+    })
+  })
+
+  describe('keyboard navigation', () => {
+    const cell = (row: number, col: number) => within(bodyRows()[row]!).getAllByRole('gridcell')[col]!
+
+    it('has a single tab stop: the first cell until the user moves', async () => {
+      const user = userEvent.setup()
+      renderTable()
+
+      await user.tab() // search box
+      for (let i = 0; i < 5; i += 1) await user.tab() // five sort buttons
+      await user.tab() // into the grid
+
+      expect(cell(0, 0)).toHaveFocus()
+      expect(within(table()).getAllByRole('gridcell').filter((c) => c.tabIndex === 0)).toHaveLength(1)
+    })
+
+    it('moves between rows with ↑/↓ and between cells with ←/→, staying inside the table', async () => {
+      const user = userEvent.setup()
+      renderTable()
+      cell(0, 0).focus()
+
+      await user.keyboard('{ArrowDown}{ArrowDown}')
+      expect(cell(2, 0)).toHaveFocus()
+
+      await user.keyboard('{ArrowRight}{ArrowRight}')
+      expect(cell(2, 2)).toHaveFocus()
+
+      await user.keyboard('{ArrowUp}{ArrowLeft}')
+      expect(cell(1, 1)).toHaveFocus()
+
+      await user.keyboard('{ArrowUp}{ArrowUp}{ArrowLeft}{ArrowLeft}')
+      expect(cell(0, 0)).toHaveFocus()
+
+      await user.keyboard('{End}{ArrowDown}')
+      expect(cell(5, 0)).toHaveFocus()
+
+      for (let i = 0; i < 6; i += 1) await user.keyboard('{ArrowRight}')
+      expect(cell(5, 4)).toHaveFocus()
+    })
+
+    it('jumps to the first / last row with Home / End, keeping the column', async () => {
+      const user = userEvent.setup()
+      renderTable()
+      cell(2, 3).focus()
+
+      await user.keyboard('{End}')
+      expect(cell(5, 3)).toHaveFocus()
+
+      await user.keyboard('{Home}')
+      expect(cell(0, 3)).toHaveFocus()
+    })
+
+    it('selects the focused row with Enter', async () => {
+      const user = userEvent.setup()
+      const onSelect = vi.fn()
+      renderTable({ onSelect })
+      cell(0, 0).focus()
+
+      await user.keyboard('{ArrowDown}{Enter}')
+
+      expect(onSelect).toHaveBeenCalledWith('d1-1')
+    })
+
+    it('prevents the page from scrolling on navigation keys', () => {
+      renderTable()
+      cell(0, 0).focus()
+
+      const event = new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true })
+      cell(0, 0).dispatchEvent(event)
+
+      expect(event.defaultPrevented).toBe(true)
+    })
+
+    it('follows the visual order after sorting', async () => {
+      const user = userEvent.setup()
+      renderTable()
+      await user.click(sortButton('Всего сотрудников')) // Маркетинг, Дизайн, …
+
+      cell(0, 0).focus()
+      await user.keyboard('{ArrowDown}')
+
+      expect(document.activeElement).toHaveTextContent('Дизайн')
+    })
+
+    it('continues from the row the user clicked', async () => {
+      const user = userEvent.setup()
+      renderTable()
+
+      await user.click(cell(3, 1))
+      await user.keyboard('{ArrowDown}')
+
+      expect(cell(4, 1)).toHaveFocus()
+    })
+
+    it('makes the row selected elsewhere the tab stop, without stealing focus', () => {
+      const { rerender } = renderTable()
+      rerender(<OrgTable rows={rows} selectedId="d2" onSelect={vi.fn()} />)
+
+      expect(cell(4, 0)).toHaveAttribute('tabindex', '0')
+      expect(cell(0, 0)).toHaveAttribute('tabindex', '-1')
+      expect(document.body).toHaveFocus()
+    })
+
+    it('falls back to the first row when the active row is filtered out', () => {
+      vi.useFakeTimers()
+      renderTable()
+      fireEvent.click(cell(3, 0)) // Дизайн
+
+      typeInto(searchbox(), 'продаж')
+      act(() => vi.advanceTimersByTime(FILTER_DEBOUNCE_MS))
+
+      expect(cell(0, 0)).toHaveAttribute('tabindex', '0')
+    })
+
+    it('ignores navigation keys pressed in the header', async () => {
+      const user = userEvent.setup()
+      renderTable()
+      sortButton('Уровень').focus()
+
+      await user.keyboard('{ArrowDown}')
+
+      expect(sortButton('Уровень')).toHaveFocus()
+    })
+  })
+
+  describe('live updates', () => {
+    it('flashes only the cells whose values changed', () => {
+      const { rerender } = renderTable()
+      const updated = buildOrgTreeModel(sampleOrgNodes.map((n) => (n.id === 'd2-1' ? { ...n, headcount: 12 } : n))).rows
+
+      rerender(<OrgTable rows={updated} selectedId={null} onSelect={vi.fn()} />)
+
+      const flashing = within(table())
+        .getAllByTestId('flash')
+        .filter((el) => el.getAttribute('data-flash') === 'true')
+        .map((el) => `${el.closest('tr')!.querySelector('td')!.textContent}:${el.textContent}`)
+      // Маркетинг: headcount 2 → 12. Its ancestor Продажи: total 5 → 15 and weighted performance
+      // (3·55 + 2·75)/5 = 63,0 → (3·55 + 12·75)/15 = 71,0. Budgets and Маркетинг's performance are unchanged.
+      expect(flashing).toEqual(['Продажи:15', 'Продажи:71,0', 'Маркетинг:12'])
+    })
+
+    it('does not flash when rows are only re-sorted or re-filtered', async () => {
+      const user = userEvent.setup()
+      renderTable()
+
+      await user.click(sortButton('Бюджет суммарный'))
+
+      expect(within(table()).queryAllByTestId('flash').filter((el) => el.hasAttribute('data-flash'))).toHaveLength(0)
     })
   })
 

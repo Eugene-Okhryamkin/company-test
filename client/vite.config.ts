@@ -18,6 +18,8 @@ export default defineConfig({
       '/api': {
         target: process.env.VITE_API_PROXY_TARGET ?? 'http://localhost:8080',
         changeOrigin: true,
+        // Also forwards the /api/live WebSocket upgrade.
+        ws: true,
       },
     },
   },

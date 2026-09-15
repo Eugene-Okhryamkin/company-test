@@ -38,4 +38,37 @@ describe('InMemoryOrgNodeRepository', () => {
     expect(second[0]!.headcount).toBe(5);
     expect(second[0]!.updatedAt.getFullYear()).toBe(2026);
   });
+
+  describe('saveMany', () => {
+    it('replaces stored nodes by id, keeping order and other nodes', async () => {
+      const repository = new InMemoryOrgNodeRepository({
+        orgNodesSeed: [makeNode({ id: 'a', headcount: 1 }), makeNode({ id: 'b', headcount: 2 })],
+      });
+
+      await repository.saveMany([makeNode({ id: 'b', headcount: 20 })]);
+
+      expect((await repository.findAll()).map((n) => [n.id, n.headcount])).toEqual([
+        ['a', 1],
+        ['b', 20],
+      ]);
+    });
+
+    it('stores copies of the saved nodes', async () => {
+      const repository = new InMemoryOrgNodeRepository({ orgNodesSeed: [makeNode({ id: 'a' })] });
+      const saved = makeNode({ id: 'a', headcount: 7 });
+
+      await repository.saveMany([saved]);
+      saved.headcount = 999;
+
+      expect((await repository.findAll())[0]!.headcount).toBe(7);
+    });
+
+    it('ignores nodes that are not stored', async () => {
+      const repository = new InMemoryOrgNodeRepository({ orgNodesSeed: [makeNode({ id: 'a' })] });
+
+      await repository.saveMany([makeNode({ id: 'ghost' })]);
+
+      expect((await repository.findAll()).map((n) => n.id)).toEqual(['a']);
+    });
+  });
 });

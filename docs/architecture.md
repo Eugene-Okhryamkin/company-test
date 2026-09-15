@@ -1,6 +1,6 @@
 # Архитектура
 
-> Документ дополняется по мере реализации этапов. Сейчас описаны **backend**, **client** (этапы 01 FOUNDATION и 02 CORE) и **запуск через Docker Compose**. Модель данных и алгоритм агрегации — в [`data-model.md`](data-model.md). Нетривиальные решения вынесены в [ADR](adr/).
+> Документ дополняется по мере реализации этапов. Сейчас описаны **backend**, **client** (этапы 01 FOUNDATION, 02 CORE, 03 POLISH) и **запуск через Docker Compose**. Модель данных и алгоритм агрегации — в [`data-model.md`](data-model.md). Нетривиальные решения вынесены в [ADR](adr/).
 
 ## Обзор
 
@@ -33,6 +33,7 @@ Mock API на **Express 5 + TypeScript** (ESM, `strict`). Отдаёт орг-с
 | Задача | Инструмент |
 |---|---|
 | HTTP-сервер | Express 5 (async-ошибки обработчиков попадают в error-middleware без обёрток) |
+| Live-обновления | [ws](https://github.com/websockets/ws) — WebSocket-сервер на том же HTTP-порту, путь `/api/live` |
 | Dependency Injection | [Awilix](https://github.com/jeffijoe/awilix), `InjectionMode.PROXY`, `strict` |
 | Язык | TypeScript 5, `module: NodeNext` |
 | Абсолютные импорты | `paths` в tsconfig; `tsc-alias` при сборке; `tsx` и Vitest резолвят алиасы сами |
@@ -105,25 +106,31 @@ import { makeNode } from '@tests/helpers/org-node.factory.js';      // tests/* (
 | `orgNodesSeed` | `asValue(orgNodesSeed)` | — | `readonly OrgNode[]` |
 | `orgNodeRepository` | `asClass(InMemoryOrgNodeRepository)` | singleton | `OrgNodeRepository` |
 | `orgNodeMapper` | `asClass(OrgNodeMapper)` | singleton | `OrgNodeMapper` |
-| `orgTreeService` | `asClass(OrgTreeService)` | singleton | `OrgTreeReader` |
+| `random` | `asValue(Math.random)` | — | `() => number` |
+| `orgTreeChangeBus` | `asClass(OrgTreeChangeBus)` | singleton | `OrgTreeChangeBus` |
+| `orgTreeService` | `asClass(OrgTreeService)` | singleton | `OrgTreeServiceApi` (reader + writer) |
 | `orgTreeController` | `asClass(OrgTreeController)` | singleton | `OrgTreeController` |
+| `liveUpdateSimulator` | `asClass(LiveUpdateSimulator)`, disposer `stop()` | singleton | `LiveUpdateSimulator` |
+| `liveUpdatesGateway` | `asClass(LiveUpdatesGateway)`, disposer `close()` | singleton | `LiveUpdatesGateway` |
 
 Граф зависимостей:
 
 ```
-orgTreeController ─┬─► orgTreeService ──► orgNodeRepository ──► orgNodesSeed
-                   └─► orgNodeMapper
+orgTreeController ──┬─► orgTreeService ──┬─► orgNodeRepository ──► orgNodesSeed
+                    └─► orgNodeMapper    └─► orgTreeChangeBus
+liveUpdateSimulator ──► orgTreeService, config, random
+liveUpdatesGateway  ──► orgTreeChangeBus, orgTreeService, orgNodeMapper, config
 ```
 
 Все сервисы stateless (кроме in-memory хранилища, которое должно быть одно на процесс), поэтому все они singleton и request scope не нужен.
 
-**Запуск** (`src/index.ts`): `createAppContainer(config)` → `createApp(container)`. Роутер получает контроллер из контейнера, `container.resolve('orgTreeController')`. При SIGTERM/SIGINT сервер закрывается и вызывается `container.dispose()`.
+**Запуск** (`src/index.ts`): `createAppContainer(config)` → `createApp(container)` → `listen`. К HTTP-серверу подключается `liveUpdatesGateway.attach(server)`, при `LIVE_UPDATES_ENABLED` запускается симулятор. При SIGTERM/SIGINT `container.dispose()` вызывает disposers (остановить симулятор, закрыть WebSocket-клиентов), затем закрывается HTTP-сервер.
 
 **Подмена в тестах.** `tests/helpers/test-app.ts` собирает настоящий контейнер и заменяет выбранные регистрации через `asValue`:
 
 ```ts
 createTestApp({ orgNodesSeed: [makeNode()] });                         // другие данные
-createTestApp({ orgTreeService: { getFlatTree: vi.fn().mockRejectedValue(err) } }); // сбой сервиса
+createTestApp({ orgTreeService: { getSnapshot: vi.fn().mockRejectedValue(err), getVersion: () => 0, applyChanges: vi.fn() } }); // сбой сервиса
 ```
 
 ### Структура каталогов
@@ -133,7 +140,7 @@ backend/
 ├── src/
 │   ├── index.ts                         # bootstrap: контейнер → app → listen, graceful shutdown
 │   ├── app.ts                           # createApp(container)
-│   ├── config.ts                        # PORT / HOST / NODE_ENV
+│   ├── config.ts                        # PORT / HOST / NODE_ENV / LIVE_*
 │   ├── di/
 │   │   └── container.ts                 # Cradle, createAppContainer()
 │   ├── routes/
@@ -142,16 +149,23 @@ backend/
 │   ├── controllers/
 │   │   └── org-tree.controller.ts       # OrgTreeController
 │   ├── services/
-│   │   ├── org-tree.service.ts          # OrgTreeService (OrgTreeReader)
-│   │   └── org-tree.validator.ts        # правила целостности дерева
+│   │   ├── org-tree.service.ts          # OrgTreeService: getSnapshot / getVersion / applyChanges
+│   │   ├── org-tree.validator.ts        # правила целостности дерева
+│   │   └── live-update-simulator.ts     # mock-источник изменений (setInterval)
+│   ├── events/
+│   │   └── org-tree-change-bus.ts       # pub/sub: сервис → транспорты
+│   ├── gateways/
+│   │   └── live-updates.gateway.ts      # WebSocket /api/live: hello, patch, heartbeat
 │   ├── repositories/
 │   │   └── org-node.repository.ts       # интерфейс + InMemoryOrgNodeRepository
 │   ├── models/
-│   │   └── org-node.model.ts            # OrgNode
+│   │   ├── org-node.model.ts            # OrgNode
+│   │   └── org-tree-patch.model.ts      # OrgNodeChange, OrgTreePatch
 │   ├── dto/
-│   │   └── org-node.dto.ts              # OrgNodeDto
+│   │   ├── org-node.dto.ts              # OrgNodeDto
+│   │   └── live-message.dto.ts          # LiveMessageDto (hello | patch | heartbeat)
 │   ├── mappers/
-│   │   └── org-node.mapper.ts           # OrgNodeMapper: OrgNode → OrgNodeDto
+│   │   └── org-node.mapper.ts           # OrgNodeMapper: OrgNode → OrgNodeDto / patch message
 │   ├── middlewares/
 │   │   ├── not-found.middleware.ts
 │   │   └── error-handler.middleware.ts
@@ -162,7 +176,7 @@ backend/
 │   │   ├── org-node.factory.ts          # makeNode()
 │   │   └── test-app.ts                  # createTestApp(overrides) на реальном контейнере
 │   ├── unit/                            # config, di, controllers, services, repositories, mappers, middlewares, seeds
-│   └── integration/                     # HTTP-уровень через supertest
+│   └── integration/                     # HTTP (supertest) и WebSocket (ws-клиент на реальном сервере)
 ├── Dockerfile
 ├── vitest.config.ts
 ├── tsconfig.json                        # сборка (только src), paths @/*
@@ -184,12 +198,12 @@ sequenceDiagram
     Note over R,M: экземпляры созданы и связаны DI-контейнером при старте
     C->>R: GET /api/org-tree [If-None-Match]
     R->>Ctl: getOrgTree
-    Ctl->>S: getFlatTree()
+    Ctl->>S: getSnapshot()
     S->>Repo: findAll()
     Repo-->>S: OrgNode[] (копии)
     S->>S: validateOrgNodes(nodes)
     alt данные целостны
-        S-->>Ctl: OrgNode[]
+        S-->>Ctl: { version, nodes: OrgNode[] }
         Ctl->>M: toDtoList(nodes)
         M-->>Ctl: OrgNodeDto[]
         Ctl-->>C: 200 JSON + ETag, Cache-Control: no-cache<br/>или 304, если ETag совпал
@@ -201,11 +215,49 @@ sequenceDiagram
 ```
 
 1. **Router** передаёт запрос в `OrgTreeController.getOrgTree`. Метод объявлен стрелочным свойством, поэтому `this` сохраняется, когда метод передаётся в Express как функция.
-2. **Controller** вызывает `orgTreeService.getFlatTree()`. Зависит от интерфейса `OrgTreeReader`.
+2. **Controller** вызывает `orgTreeService.getSnapshot()` и отдаёт версию в заголовке `X-Data-Version`. Зависит от интерфейса `OrgTreeReader`.
 3. **Service** получает `OrgNode[]` из репозитория и проверяет инварианты дерева. Невалидные данные клиенту не отдаются.
 4. **Repository** возвращает глубокие копии (включая `Date`), поэтому вызывающий код не может испортить хранилище.
 5. **Mapper** превращает модели в `OrgNodeDto[]`.
 6. Express считает слабый **ETag** по телу ответа. Если клиент прислал совпадающий `If-None-Match`, уходит `304 Not Modified` без тела.
+
+### Live-обновления (WebSocket)
+
+```mermaid
+sequenceDiagram
+    participant Sim as LiveUpdateSimulator
+    participant S as OrgTreeService
+    participant R as Repository
+    participant Bus as OrgTreeChangeBus
+    participant G as LiveUpdatesGateway
+    participant C as Clients (ws)
+
+    C->>G: upgrade /api/live
+    G-->>C: hello { version, heartbeatIntervalMs }
+    loop каждые LIVE_UPDATE_INTERVAL_MS
+        Sim->>S: applyChanges([{ id, fields }] × 1…N)
+        S->>S: валидация всех изменений (атомарно)
+        S->>R: saveMany(updated)
+        S->>S: version += 1
+        S->>Bus: publish({ version, nodes })
+        Bus->>G: patch
+        G-->>C: patch { version, nodes }
+    end
+    loop каждые LIVE_HEARTBEAT_INTERVAL_MS
+        G->>C: ping (неответившие — terminate)
+        G-->>C: heartbeat { version }
+    end
+```
+
+| Компонент | Слой | Ответственность |
+|---|---|---|
+| `OrgTreeService.applyChanges` | services | **Бизнес-логика изменений**: проверка существования узлов и правил полей для всего пакета до записи (атомарно), сохранение, `version + 1`, публикация патча |
+| `OrgTreeChangeBus` | events | In-process pub/sub. Сервис не знает о транспорте; упавший подписчик не мешает остальным |
+| `LiveUpdatesGateway` | gateways | Транспорт (аналог контроллера для WebSocket): upgrade только на `/api/live` (иначе 404), `hello`, рассылка патчей открытым клиентам, heartbeat: ping + прикладное сообщение, отключение «мёртвых» клиентов |
+| `LiveUpdateSimulator` | services | Mock-источник данных: раз в интервал меняет 1…`LIVE_UPDATE_MAX_NODES` случайных узлов (performance ±0,5–3 п., бюджет ±3% с шагом 10 000, headcount ±1), всегда валидные значения |
+| `OrgNodeMapper.toPatchMessage` | mappers | Модель → DTO патча |
+
+`GET /api/org-tree` и live-канал используют одну версию из `OrgTreeService`, поэтому клиент может проверить, что snapshot и патчи идут без пропусков.
 
 ### API
 
@@ -236,7 +288,11 @@ sequenceDiagram
 | `404` | Другие методы (`POST`/`PUT`/`PATCH`/`DELETE`) и неизвестные пути | `{"error":"Not Found"}` |
 | `500` | Нарушена целостность данных или внутренняя ошибка | `{"error":"Internal Server Error"}`, без деталей |
 
-Заголовки ответа: `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-cache`, `ETag: W/"…"`.
+Заголовки ответа: `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-cache`, `ETag: W/"…"`, `X-Data-Version: <n>` — версия данных для выравнивания с live-патчами.
+
+#### `WS /api/live`
+
+Live-обновления: `hello` при подключении, `patch` на каждое изменение, `heartbeat` по таймеру. Контракт — в [`data-model.md`, раздел 4](data-model.md#4-websocket-патч-live-обновления).
 
 Отдельного health-check эндпоинта нет: задание его не требует.
 
@@ -276,6 +332,10 @@ sequenceDiagram
 | `PORT` | `8080` | Некорректное значение (не целое, вне 1–65535) → `8080` |
 | `HOST` | не задан | Пусто → слушать `::` (IPv4 + IPv6). Если явно указать `0.0.0.0`, сервер будет только IPv4 и `localhost` → `::1` на macOS получит отказ |
 | `NODE_ENV` | `development` | В Docker-образе `production` |
+| `LIVE_UPDATES_ENABLED` | `true` | `false` — симулятор не запускается (канал `/api/live` работает, патчей нет) |
+| `LIVE_UPDATE_INTERVAL_MS` | `3000` | Период изменений, минимум 250 мс |
+| `LIVE_UPDATE_MAX_NODES` | `3` | Максимум узлов, меняющихся за такт (минимум 1) |
+| `LIVE_HEARTBEAT_INTERVAL_MS` | `15000` | Период ping и heartbeat-сообщений |
 
 Конфиг регистрируется в DI-контейнере как значение `config`.
 
@@ -293,11 +353,15 @@ sequenceDiagram
 | Unit | `tests/unit/mappers/…` | Точная форма DTO, ISO-даты, отсутствие лишних полей |
 | Unit | `tests/unit/middlewares/…` | 500 без утечки деталей, поведение при `headersSent` |
 | Unit | `tests/unit/seeds/…` | ≥ 40 узлов, ≥ 3 уровня, проходит валидатор |
-| Unit | `tests/unit/config.test.ts` | Разбор `PORT`/`HOST`/`NODE_ENV` |
-| Integration | `tests/integration/org-tree.api.test.ts` | 200/JSON/форма, `[]`, ETag + 304, смена ETag при смене данных, 500 при сбое внедрённого сервиса, 404 на запись |
+| Unit | `tests/unit/config.test.ts` | Разбор `PORT`/`HOST`/`NODE_ENV` и `LIVE_*` с защитой от некорректных значений |
+| Unit | `tests/unit/services/org-tree.service.test.ts` (applyChanges) | Изменение только переданных полей, версия +1 на пакет, публикация патча, пустой пакет, атомарный отказ при неизвестном узле или невалидном значении |
+| Unit | `tests/unit/events/…` | Доставка всем подписчикам, отписка, изоляция упавшего подписчика |
+| Unit | `tests/unit/services/live-update-simulator.test.ts` | Валидность сгенерированных метрик, отскок от границ, 1…N различных узлов за такт, интервал, start/stop, повторный start, падение такта не останавливает симулятор |
+| Integration | `tests/integration/live-updates.gateway.test.ts` | Реальный HTTP-сервер + ws-клиенты: `hello` с версией, рассылка патча всем, heartbeat с версией, отключение клиента без pong, 404 на другой путь, `close()` (идемпотентно), ошибки сокета, отправка только открытым |
+| Integration | `tests/integration/org-tree.api.test.ts` | 200/JSON/форма, `[]`, ETag + 304, `X-Data-Version` и его рост после `applyChanges`, смена ETag при смене данных, 500 при сбое внедрённого сервиса, 404 на запись |
 | Integration | `tests/integration/app.test.ts` | 404 JSON, health-check отсутствует, нет `X-Powered-By` |
 
-Покрытие: **100%** по statements, branches, functions и lines. Из подсчёта исключены `src/index.ts` (bootstrap процесса), `src/models` и `src/dto` (только типы).
+Покрытие: **100%** строк, 99,6% statements, 96,8% веток (непокрыты гонки при отправке в закрывающийся сокет). Из подсчёта исключены `src/index.ts` (bootstrap процесса), `src/models` и `src/dto` (только типы).
 
 ### Команды
 
@@ -332,12 +396,14 @@ docker run -d --name staff-pulse-backend -p 8080:8080 staff-pulse-backend
 
 ### Точки расширения
 
-- **Live-обновления (этап 03).** Добавить в репозиторий метод `update()`, зарегистрировать в контейнере сервис рассылки патчей (WebSocket или SSE) и внедрить его туда, где меняются данные. `GET`-цепочка не меняется.
+- **Реальный источник изменений.** Вместо `LiveUpdateSimulator` — любой код, вызывающий `orgTreeService.applyChanges` (REST-эндпоинт, очередь). Шлюз и клиент не меняются.
+- **Другой транспорт** (SSE) — ещё один подписчик `OrgTreeChangeBus`.
+- **Горизонтальное масштабирование** — заменить in-process шину на внешнюю (Redis Pub/Sub) и хранить версию в общем хранилище.
 - **Другое хранилище.** Реализовать `OrgNodeRepository` и заменить одну регистрацию `orgNodeRepository` в `src/di/container.ts`. Остальные слои не затрагиваются.
 
 ## Client
 
-SPA на **Vite 8 + React 19 + TypeScript 6**: дерево оргструктуры и аналитическая таблица. Стили на **styled-components**, запросы и кэш через **TanStack Query**, runtime-валидация через **zod**. UI-библиотек нет.
+SPA на **Vite 8 + React 19 + TypeScript 6**: дерево оргструктуры и аналитическая таблица с live-обновлениями по WebSocket. Стили на **styled-components**, запросы и кэш через **TanStack Query**, runtime-валидация через **zod**. UI-библиотек нет.
 
 ### Стек
 
@@ -348,6 +414,7 @@ SPA на **Vite 8 + React 19 + TypeScript 6**: дерево оргструкту
 | Стили | styled-components 6 (тема через `ThemeProvider`, без inline-CSS) |
 | Валидация ответа API | zod 4 |
 | Запросы и кэш | TanStack Query 5 (stale-while-revalidate), см. [ADR-001](adr/001-server-state-tanstack-query.md) |
+| Live-обновления | нативный `WebSocket` + собственный `ReconnectingSocket` (backoff, watchdog, online/offline), см. [ADR-005](adr/005-live-updates-websocket.md) |
 | Тесты | Vitest + Testing Library + jsdom |
 | Линтер | oxlint |
 | Production-раздача | nginx (`nginx:stable-alpine`) |
@@ -357,21 +424,22 @@ SPA на **Vite 8 + React 19 + TypeScript 6**: дерево оргструкту
 Структура по мотивам Feature-Sliced Design: каждый слой импортирует только слои ниже себя.
 
 ```
-app  →  widgets  →  entities  →  shared
+app  →  widgets  →  features  →  entities  →  shared
 ```
 
 | Слой | Каталог | Ответственность |
 |---|---|---|
 | **app** | `src/app/` | Точка сборки: провайдеры (тема, глобальные стили, `QueryClientProvider`), единый `queryClient`, каркас страницы |
 | **widgets** | `src/widgets/` | Готовые блоки интерфейса. `org-dashboard` — состояния данных, раскладка (split-view или переключатель) и общее выделение. `org-tree` — дерево. `org-table` — аналитическая таблица с сортировкой и фильтром |
-| **entities** | `src/entities/org-node/` | Предметная сущность «узел оргструктуры»: схема (`model`), запрос и хуки (`api`), построение дерева, агрегация и модель (`lib`), `PerformanceIndicator` (`ui`) |
-| **shared** | `src/shared/` | Код без привязки к предметной области: HTTP-клиент, ошибки и фабрика `QueryClient` (`api`), форматирование, дебаунс, media query (`lib`), тема (`styles`), базовые компоненты (`ui`) |
+| **features** | `src/features/live-updates/` | Пользовательская возможность «данные обновляются в реальном времени»: `LiveUpdatesProvider` (сокет → кэш), статус соединения (`useLiveStatus`), `ConnectionIndicator` |
+| **entities** | `src/entities/org-node/` | Предметная сущность «узел оргструктуры»: схема (`model`), запрос и хуки (`api`), построение дерева, агрегация, модель и её инкрементальное обновление (`lib`), live-сообщения, версия данных и применение патча (`live`), `PerformanceIndicator` (`ui`) |
+| **shared** | `src/shared/` | Код без привязки к предметной области: HTTP-клиент, ошибки и фабрика `QueryClient` (`api`), форматирование, дебаунс, media query, backoff и `ReconnectingSocket` (`lib`), тема (`styles`), базовые компоненты, включая `FlashOnChange` и `Collapse` (`ui`) |
 
 ```
 client/src/
 ├── main.tsx
 ├── app/
-│   ├── app.tsx                        # каркас: header + main
+│   ├── app.tsx                        # каркас: header (+ индикатор соединения) + main; LiveUpdatesProvider
 │   ├── app-providers.tsx              # ThemeProvider, GlobalStyle, QueryClientProvider
 │   └── query-client.ts                # единый QueryClient приложения
 ├── widgets/
@@ -380,30 +448,40 @@ client/src/
 │   │   └── org-dashboard.styles.ts
 │   ├── org-tree/
 │   │   ├── org-tree.tsx               # role="tree"; раскрытие предков выбранного узла
-│   │   ├── org-tree-item.tsx          # role="treeitem", memo, aria-selected, scrollIntoView
+│   │   ├── org-tree-item.tsx          # role="treeitem", memo, aria-selected, scrollIntoView, Collapse, FlashOnChange
 │   │   ├── org-tree.styles.ts
 │   │   └── use-tree-expansion.ts      # isExpanded / toggle / expand
 │   └── org-table/
-│       ├── org-table.tsx              # role="grid"; сортировка, фильтр (дебаунс 250 мс), выбор строки
+│       ├── org-table.tsx              # role="grid"; сортировка, фильтр, выбор, клавиатура (roving tabindex), подсветка
 │       ├── org-table.styles.ts
 │       └── lib/
 │           ├── sort-rows.ts           # sortRows, applySortToggle
 │           └── filter-rows.ts         # filterRowsByName (регистр, ё ≡ е)
+├── features/live-updates/
+│   ├── live-updates-provider.tsx      # сокет → applyOrgTreePatch / resync; статус в контекст
+│   ├── live-url.ts                    # ws(s)://origin/api/live, HEARTBEAT_TIMEOUT_FACTOR
+│   ├── live-status-context.ts, use-live-status.ts
+│   └── ui/connection-indicator.tsx    # «Онлайн» / «Нет связи · повтор через N с» + «Переподключиться»
 ├── entities/org-node/
 │   ├── model/org-node.schema.ts       # zod-схема ответа + тип OrgNode
 │   ├── model/performance.ts           # пороги и уровни эффективности
 │   ├── lib/build-org-tree.ts          # плоский список → лес, O(n)
 │   ├── lib/aggregate-org-tree.ts      # агрегаты поддеревьев, O(n), без рекурсии
-│   ├── lib/org-tree-model.ts          # forest + byId + stats + rows; getOrgTreeModel (WeakMap-мемо)
-│   ├── api/org-tree.api.ts            # fetchOrgTree(signal)
-│   ├── api/org-tree.query.ts          # useOrgTreeQuery, useOrgTreeModelQuery (select)
+│   ├── lib/org-tree-model.ts          # forest + byId + stats + rows; getOrgTreeModel (WeakMap-мемо), peek/prime
+│   ├── lib/update-org-tree-model.ts   # инкрементальный пересчёт пути «узел → корень»
+│   ├── live/live-message.schema.ts    # zod: hello | heartbeat | patch
+│   ├── live/data-version.ts           # версия snapshot по ссылке на массив данных
+│   ├── live/apply-org-tree-patch.ts   # patch → кэш TanStack: applied | ignored | resync
+│   ├── api/org-tree.api.ts            # fetchOrgTree(signal) + X-Data-Version
+│   ├── api/org-tree.query.ts          # useOrgTreeQuery, useOrgTreeModelQuery (select), structuralSharing с версией
 │   └── ui/performance-indicator.tsx
 ├── shared/
 │   ├── api/                           # http-client, get-error-message, query-client
 │   ├── lib/                           # format, use-debounced-value, use-media-query, prefers-reduced-motion
+│   ├── lib/live/                      # backoff, reconnecting-socket
 │   ├── styles/                        # theme, GlobalStyle, типизация DefaultTheme
-│   └── ui/                            # LoadingState, ErrorState, EmptyState, Button, Panel
-└── test/                              # setup, фикстуры, renderWithProviders, мок matchMedia
+│   └── ui/                            # LoadingState, ErrorState, EmptyState, Button, Panel, FlashOnChange, Collapse
+└── test/                              # setup, фикстуры, renderWithProviders, мок matchMedia, FakeWebSocket
                                        # в каждом каталоге модулей — __tests__/ с его тестами
 ```
 
@@ -464,6 +542,51 @@ sequenceDiagram
 
 Каждое из этих требований закреплено тестом в `entities/org-node/api/__tests__/org-tree.query.test.tsx`. Если выключить `structuralSharing`, падают 4 теста, а если убрать мемоизацию модели — 2 теста.
 
+### Live-обновления
+
+```mermaid
+sequenceDiagram
+    participant WS as ReconnectingSocket
+    participant P as LiveUpdatesProvider
+    participant A as applyOrgTreePatch
+    participant QC as TanStack cache
+    participant M as updateOrgTreeModel
+    participant UI as OrgTree / OrgTable
+
+    WS->>P: hello { version, heartbeatIntervalMs }
+    P->>WS: setHeartbeatTimeout(interval × 2,5)
+    alt версия snapshot совпадает
+        P->>QC: setQueryData(data, updatedAt = now)
+    else отличается
+        P->>QC: invalidateQueries → один GET
+    end
+    WS->>P: patch { version, nodes }
+    P->>A: applyOrgTreePatch(client, patch)
+    alt version = текущая + 1
+        A->>M: пересчёт только пути «узел → корень»
+        A->>QC: setQueryData(новый массив) — без запроса
+        QC-->>UI: новые ссылки только у изменённых узлов, строк и предков
+        UI->>UI: FlashOnChange: изменившиеся ячейки гаснут за 1,5 с
+    else пропуск версий / неизвестный узел
+        P->>QC: invalidateQueries → один GET
+    end
+```
+
+| Требование | Реализация |
+|---|---|
+| Транспорт | WebSocket `/api/live` через тот же origin (nginx `location = /api/live` с `Upgrade`, Vite proxy `ws: true`) |
+| Патч без полного рефетча | `applyOrgTreePatch` пишет данные прямо в кэш TanStack (`setQueryData`); запрос `GET` делается только при пропуске версий или рестарте сервера |
+| Пересчёт только затронутых | `updateOrgTreeModel` пересчитывает узел и его предков; модель регистрируется для нового массива, поэтому `select` не запускает полную агрегацию (тест: `aggregateOrgTree` не вызывается, `computeUnitStats` вызывается 3 раза для пути глубиной 3) |
+| Подсветка обновлённых ячеек | `FlashOnChange` сравнивает **отображаемое** значение, при изменении включает CSS-анимацию фона на 1,5 с; повторное изменение перезапускает её. Сортировка и фильтрация не подсвечивают (значение не меняется). В таблице — итоги по сотрудникам, бюджету и эффективности (включая предков), в дереве — headcount |
+| Индикатор соединения | `ConnectionIndicator` в шапке: «Онлайн» (зелёный), «Подключение…», «Нет связи · повтор через N с» с кнопкой «Переподключиться», «Нет сети», «Отключено»; `role="status"` |
+| Экспоненциальный backoff | `computeBackoffDelay`: 500 мс × 2^attempt, максимум 30 с, джиттер ±20 %; сброс после успешного подключения |
+| Обнаружение «мёртвого» соединения | Watchdog: попытка, не открывшаяся за 10 с, и соединение без сообщений дольше `2,5 × heartbeatIntervalMs` закрываются и переподключаются. На nginx `proxy_connect_timeout 5s`, чтобы при остановленном backend попытка не висела 60 с |
+| Сеть | При `offline` сокет закрывается и попытки не тратятся; при `online` — переподключение сразу |
+| Отмена при размонтировании | Провайдер закрывает сокет и снимает таймеры и слушатели |
+| Свежесть кэша | Heartbeat с совпадающей версией обновляет `dataUpdatedAt`: пока канал жив, focus и повторное монтирование не делают запросов |
+
+Проверено в браузере (Docker): за 9 с — 10 подсветок и ни одного дополнительного `GET`; при остановке backend видны переходы 0,5 → 1 → 2 → 4 с, после запуска — «Онлайн» и ровно один resync-запрос.
+
 ### Агрегация
 
 Суммарные показатели включают узел и всех его потомков. Алгоритм, формулы и сложность описаны в [`data-model.md`](data-model.md).
@@ -499,7 +622,9 @@ sequenceDiagram
 - **Раскрытие по умолчанию:** развёрнут первый уровень, так что второй уровень (отделы) виден сразу, см. [ADR-003](adr/003-tree-default-expansion.md).
 - **Клик по элементу дерева:** кликабельна вся строка узла. Для узла с детьми клик раскрывает или сворачивает ветку и одновременно выбирает узел (строка подсвечивается в таблице); для листа — только выбирает. Стрелка только раскрывает или сворачивает (`stopPropagation`, без выбора). Название рендерится как `<button>`, поэтому то же действие доступно с клавиатуры: Tab + Enter.
 - **Выделение из таблицы:** когда меняется `selectedId`, `OrgTree` раскрывает всех предков узла прямо во время рендера (без мелькания скрытого узла), а строка прокручивается в зону видимости через `scrollIntoView({ block: 'nearest' })`. При `prefers-reduced-motion` прокрутка без анимации. Пользователь может свернуть ветку и после выбора; повторный выбор узла снова её раскроет.
-- **Производительность:** модель мемоизирована, `OrgTreeItem` обёрнут в `memo`, дочерние узлы свёрнутой ветки не монтируются.
+- **Анимация раскрытия:** `Collapse` анимирует настоящий `transition: height`. При раскрытии 0 → измеренная высота → `auto`; при сворачивании `auto` → измеренная высота → 0 → размонтирование. Высота задаётся классами styled-components (без inline-стилей). Во время сворачивания содержимое `inert` и `aria-hidden`. Если `transitionend` не пришёл, срабатывает страховочный таймер. При `prefers-reduced-motion: reduce` переключение мгновенное (`useMediaQuery` реагирует на смену настройки).
+- **Live:** изменившийся headcount узла подсвечивается (`FlashOnChange`).
+- **Производительность:** модель мемоизирована и обновляется инкрементально, `OrgTreeItem` обёрнут в `memo` — при патче перерисовываются только элементы на пути «узел → корень»; дочерние узлы свёрнутой ветки не монтируются.
 
 ### Таблица
 
@@ -508,18 +633,19 @@ sequenceDiagram
 | Столбцы | Подразделение · Уровень · Всего сотрудников · Бюджет суммарный · Средняя эффективность |
 | Порядок по умолчанию | Иерархический (обход в глубину, как в дереве) |
 | Сортировка | Клик по новому столбцу — по возрастанию; **повторный клик по активному столбцу или двойной клик — обратный порядок**. Второй клик в составе двойного (`event.detail > 1`) игнорируется, поэтому двойной клик перестраивает таблицу ровно один раз. Одинаковые значения остаются в иерархическом порядке (стабильная сортировка). Названия сравниваются через `Intl.Collator('ru')` |
-| Клавиатура | Заголовки — нативные кнопки: Enter и Space работают как клик (сортировка, повторно — обратный порядок). `aria-sort` на `<th>` |
+| Клавиатура: заголовки | Нативные кнопки: Enter и Space работают как клик (сортировка, повторно — обратный порядок). `aria-sort` на `<th>` |
+| Клавиатура: данные | Roving tabindex — в таблице одна точка Tab (ячейка). ↑/↓ — строки, ←/→ — ячейки (в пределах таблицы), Home/End — первая / последняя строка в том же столбце, Enter — выбрать узел (выделяется в дереве). Порядок — видимый (после сортировки и фильтра). Клик по ячейке переносит позицию, узел, выбранный в дереве, становится точкой Tab без переноса фокуса, при отфильтрованной активной строке — первая строка. `preventDefault` не даёт странице прокручиваться; `scroll-margin-top` держит ячейку под sticky-заголовком |
+| Live-обновления | Изменившиеся значения подсвечиваются и гаснут за 1,5 с (`FlashOnChange`) |
 | Фильтр по названию | Поиск в реальном времени с дебаунсом **250 мс** (`useDebouncedValue`); подстрока без учёта регистра, ё ≡ е; работает вместе с сортировкой; счётчик «Показано N из M» (`aria-live`); сообщение, если ничего не найдено |
 | Клик по строке | `onSelect(id)` → узел выделяется в дереве; строка подсвечивается (`aria-selected`). Если узел выбран в дереве, строка прокручивается в зону видимости (`scrollIntoView({ block: 'nearest' })`) |
 | Форматы | Бюджет: `12 345 678 руб.` (обычные пробелы между разрядами); сотрудники: `1 234`; эффективность: один знак после запятой, `63,5`, плюс цветной индикатор |
 | Производительность | `useMemo(sortRows(filterRowsByName(rows, query), sort))`; строки — `memo`-компонент `TableRow`. Замер в браузере на 44 строках: от клика до обновления DOM 1–3 мс |
 
-`role="grid"` выбран с расчётом на этап 03: там добавится навигация по таблице стрелками, Home/End и Enter.
 
 ### Стили
 
 - Все стили задаются через styled-components и тему (`shared/styles/theme.ts`), типизация — через `DefaultTheme`.
-- Динамические значения передаются transient-пропсами (`$level`, `$expanded`, `$selected`, `$direction`) и превращаются в классы, а не в атрибут `style`.
+- Динамические значения передаются transient-пропсами (`$level`, `$expanded`, `$selected`, `$direction`, `$height`) и превращаются в классы, а не в атрибут `style`.
 - **Inline-CSS запрещён**, и это проверяется тестами. `src/test/__tests__/no-inline-styles.test.ts` сканирует исходники `.tsx` на `style={`, а тесты компонентов проверяют, что в DOM нет атрибутов `[style]`.
 - `GlobalStyle` содержит reset, шрифты, `:focus-visible` и отключает анимации при `prefers-reduced-motion`.
 
@@ -544,14 +670,17 @@ import { OrgTree } from '@/widgets/org-tree/org-tree'
 | B. Кэш (TanStack Query) | `query-client`, `org-tree.query` | Настройки проекта; pending → success; невалидный ответ → `ApiError` без повторов; один запрос под StrictMode; кэш при повторном монтировании; фоновая перепроверка; равный ответ → та же ссылка и нет перерисовки; изменённый ответ → новые ссылки только у изменённых узлов; отмена при unmount; модель считается один раз и общая для нескольких потребителей |
 | C. UI этапа 01 | `status-states`, `performance-indicator`, `use-tree-expansion`, `org-tree`, `app`, `app-providers`, `no-inline-styles` | ARIA-роли; второй уровень виден по умолчанию; name/headcount/индикатор; раскрытие мышью и клавиатурой; сохранение раскрытия при обновлении; отсутствие inline-CSS |
 | D. Логика этапа 02 | `format`, `aggregate-org-tree`, `org-tree-model`, `sort-rows`, `filter-rows`, `use-debounced-value`, `use-media-query` | Формат `12 345 678 руб.`; суммы по поддереву; взвешенная эффективность и случай без сотрудников; глубина 20 000 без переполнения стека; строки в порядке обхода в глубину; мемоизация по ссылке; предки узла; сортировка всех столбцов, стабильность, русская сортировка названий; клик / двойной клик; фильтр (регистр, ё ≡ е, пробелы); дебаунс с перезапуском таймера; media query с подпиской и отпиской, SSR |
+| F. Этап 03 | `backoff`, `reconnecting-socket`, `live-message.schema`, `data-version`, `update-org-tree-model`, `apply-org-tree-patch`, `org-tree.api` / `org-tree.query` (версия), `live-updates-provider`, `connection-indicator`, `flash-on-change`, `collapse`, `org-table` (клавиатура, подсветка), `org-tree` (подсветка, анимация), `app` | Backoff и джиттер; подключение, backoff, сброс, таймаут подключения, watchdog (в том числе асинхронный `onclose`), online/offline, `reconnectNow`, `stop`, игнор событий заменённого сокета; валидация сообщений; инкрементальная модель **совпадает с полной после 200 случайных патчей**, пересчёт только пути, сохранение ссылок; патч: applied / ignored / resync, сохранение неизменённых узлов, отсутствие полной агрегации; провайдер: патч без запроса, resync при пропуске, hello/heartbeat, свежесть, игнор до snapshot и мусорных сообщений, закрытие при unmount; индикатор со всеми состояниями и обратным отсчётом; подсветка только изменившихся ячеек (не при сортировке); высота 0 → px → auto и обратно, `inert`, страховочный таймер, смена направления, reduced motion; навигация по гриду; интеграция `App`: патч от сокета до таблицы и дерева без `GET` |
 | E. UI этапа 02 | `org-table`, `org-tree` (клик по элементу, выделение), `org-dashboard` | Раскрытие ветки кликом по всей строке, ровно одно переключение при клике по названию или стрелке, выбор листа без раскрытия; столбцы и форматы; сортировка: клик, повторный клик, двойной клик ровно с одной перестройкой, клавиатура; фильтр ровно через 250 мс и вместе с сортировкой; «ничего не найдено»; выбор и подсветка строки; раскрытие предков, `aria-selected`, `scrollIntoView` (с учётом reduced motion); split-view ≥1280px и переключатель ниже, реакция на ресайз; синхронизация выбора в обе стороны (таблица → дерево, дерево → таблица) в обоих режимах; прокрутка строки таблицы к узлу, выбранному в дереве; состояния загрузки, ошибки, пустого ответа и отмены; агрегация один раз для дерева и таблицы |
 
-Покрытие: **100%** строк, функций и statements, 99.3% веток. Мутационная проверка: без `structuralSharing` падают 4 теста, без мемоизации модели — 2, без игнорирования второго клика двойного клика — 2, без `stopPropagation` у стрелки — 7.
+Покрытие: 99,6% строк, 98,6% statements, 94,1% веток. Мутационная проверка: без `structuralSharing` падают 4 теста, без мемоизации модели — 2, без игнорирования второго клика двойного клика — 2, без `stopPropagation` у стрелки — 7.
 
 Особенности тестового окружения:
 
 - `styled-components` подменён на browser-сборку: Node-сборка не вставляет `createGlobalStyle` в DOM.
 - `window.matchMedia` в jsdom нет, поэтому используется мок `test/match-media.ts` с управляемой шириной окна (`mockMatchMedia`, `resizeViewport`).
+- `window.WebSocket` в тестах заменяется на управляемый `test/fake-web-socket.ts` (`open`, `receive`, `drop`).
+- По умолчанию мок `matchMedia` включает `prefers-reduced-motion`, поэтому анимированные компоненты завершаются мгновенно; тесты анимаций явно передают `reducedMotion: false`.
 - Дебаунс проверяется на фейковых таймерах через `fireEvent`: асинхронная обёртка Testing Library ждёт реальный `setTimeout`, который под фейковыми таймерами Vitest не срабатывает.
 
 | Скрипт | Действие |
@@ -570,7 +699,7 @@ cd backend && npm run dev   # :8080
 cd client  && npm run dev   # :5173, /api проксируется на :8080
 ```
 
-`server.proxy` в `vite.config.ts` пересылает `/api` на `http://localhost:8080` (адрес можно переопределить через `VITE_API_PROXY_TARGET`). Так в dev сохраняется тот же same-origin, что и за nginx.
+`server.proxy` в `vite.config.ts` пересылает `/api` (включая WebSocket `/api/live`, `ws: true`) на `http://localhost:8080` (адрес можно переопределить через `VITE_API_PROXY_TARGET`). Так в dev сохраняется тот же same-origin, что и за nginx.
 
 ### Docker-образ клиента
 
@@ -583,6 +712,7 @@ cd client  && npm run dev   # :5173, /api проксируется на :8080
 
 | location | Поведение |
 |---|---|
+| `= /api/live` | WebSocket: `Upgrade`/`Connection: upgrade` (через `map $http_upgrade`), `proxy_read_timeout 1h`, `proxy_connect_timeout 5s` |
 | `/api/` | `proxy_pass ${API_UPSTREAM}` (по умолчанию `http://backend:8080`) с заголовками `Host`, `X-Real-IP`, `X-Forwarded-*` |
 | `/assets/` | Файлы с хешем от Vite: `Cache-Control: public, max-age=31536000, immutable` |
 | `/` | SPA fallback `try_files … /index.html`, `Cache-Control: no-cache`, чтобы новый деплой подхватывался сразу |
@@ -602,7 +732,7 @@ docker-compose up --build     # или: docker compose up --build
 
 | Сервис | Build context | Образ | Порт на хосте → контейнер | Особенности |
 |---|---|---|---|---|
-| `backend` | `./backend` | `staff-pulse-backend` | `${BACKEND_PORT:-8080}` → `8080` | `NODE_ENV=production`, `init: true` (корректная передача SIGTERM), `restart: unless-stopped` |
+| `backend` | `./backend` | `staff-pulse-backend` | `${BACKEND_PORT:-8080}` → `8080` | `NODE_ENV=production`, `LIVE_*` из `.env`, `init: true` (корректная передача SIGTERM), `restart: unless-stopped` |
 | `client` | `./client` | `staff-pulse-client` | `${CLIENT_PORT:-5173}` → `80` | `API_UPSTREAM=http://backend:8080`, `depends_on: backend`, `restart: unless-stopped` |
 
 Сервисы находят друг друга по имени в сети Compose по умолчанию (`backend` резолвится в IP контейнера).
@@ -615,6 +745,10 @@ Compose автоматически читает `.env` из корня. Все �
 |---|---|---|
 | `CLIENT_PORT` | `5173` | Порт клиента на хосте |
 | `BACKEND_PORT` | `8080` | Порт backend на хосте (для отладки; клиенту он не нужен) |
+| `LIVE_UPDATES_ENABLED` | `true` | Включить симулятор изменений |
+| `LIVE_UPDATE_INTERVAL_MS` | `3000` | Период изменений данных |
+| `LIVE_UPDATE_MAX_NODES` | `3` | Максимум узлов за такт |
+| `LIVE_HEARTBEAT_INTERVAL_MS` | `15000` | Период ping и heartbeat |
 
 ### Полезные команды
 

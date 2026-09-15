@@ -67,6 +67,14 @@ export function getOrgTreeModel(nodes: readonly OrgNode[]): OrgTreeModel {
   return model
 }
 
+/** Model already computed for this data reference, if any (no computation). */
+export const peekOrgTreeModel = (nodes: readonly OrgNode[]): OrgTreeModel | undefined => modelCache.get(nodes)
+
+/** Registers a model computed elsewhere (e.g. incrementally from a live patch) for a data reference. */
+export function primeOrgTreeModel(nodes: readonly OrgNode[], model: OrgTreeModel): void {
+  modelCache.set(nodes, model)
+}
+
 /** Ancestor ids from the root down to the direct parent. */
 export function getAncestorIds(model: OrgTreeModel, id: string): string[] {
   const ancestors: string[] = []

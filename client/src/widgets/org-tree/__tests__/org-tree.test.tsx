@@ -1,9 +1,10 @@
-import { screen, within } from '@testing-library/react'
+import { fireEvent, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { buildOrgTreeModel } from '@/entities/org-node/lib/org-tree-model'
 import { OrgTree } from '@/widgets/org-tree/org-tree'
 import { sampleOrgNodes } from '@/test/fixtures'
+import { mockMatchMedia } from '@/test/match-media'
 import { inlineStyled, renderWithProviders } from '@/test/render'
 
 const model = buildOrgTreeModel(sampleOrgNodes)
@@ -165,17 +166,13 @@ describe('OrgTree', () => {
     })
 
     it('scrolls without animation when the user prefers reduced motion', () => {
-      const original = window.matchMedia
-      window.matchMedia = (query: string) => ({ ...original(query), matches: query.includes('prefers-reduced-motion') })
-      try {
-        renderWithProviders(<OrgTree model={model} selectedId="d1-2" />)
-        expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', behavior: 'auto' })
-      } finally {
-        window.matchMedia = original
-      }
+      mockMatchMedia({ reducedMotion: true })
+      renderWithProviders(<OrgTree model={model} selectedId="d1-2" />)
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', behavior: 'auto' })
     })
 
     it('scrolls smoothly otherwise', () => {
+      mockMatchMedia({ reducedMotion: false })
       renderWithProviders(<OrgTree model={model} selectedId="d1-2" />)
       expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', behavior: 'smooth' })
     })
@@ -267,6 +264,43 @@ describe('OrgTree', () => {
     it('keeps the tree accessible name of each item equal to the node name', () => {
       renderWithProviders(<OrgTree model={model} onSelect={vi.fn()} />)
       expect(screen.getByRole('treeitem', { name: 'Платформа' })).toBeInTheDocument()
+    })
+  })
+
+  describe('live updates and animation', () => {
+    it('flashes the headcount of a node that changed', () => {
+      const { rerender } = renderWithProviders(<OrgTree model={model} />)
+
+      rerender(<OrgTree model={buildOrgTreeModel(sampleOrgNodes.map((n) => (n.id === 'd2-1' ? { ...n, headcount: 7 } : n)))} />)
+
+      const flashes = screen.getAllByTestId('flash').filter((el) => el.getAttribute('data-flash') === 'true')
+      expect(flashes.map((el) => el.textContent)).toEqual(['7 чел.'])
+    })
+
+    it('animates collapsing: children stay until the height transition ends', async () => {
+      mockMatchMedia({ reducedMotion: false })
+      const user = userEvent.setup()
+      renderWithProviders(<OrgTree model={model} />)
+
+      await user.click(screen.getByRole('button', { name: 'Свернуть «Продажи»' }))
+
+      expect(item('Продажи')).toHaveAttribute('aria-expanded', 'false')
+      const group = screen.getByText('Маркетинг').closest('[data-testid="collapse"]')!
+      expect(group).toHaveAttribute('data-state', 'closing')
+
+      fireEvent.transitionEnd(group, { propertyName: 'height' })
+      expect(queryItem('Маркетинг')).not.toBeInTheDocument()
+    })
+
+    it('animates expanding with a height transition', async () => {
+      mockMatchMedia({ reducedMotion: false })
+      const user = userEvent.setup()
+      renderWithProviders(<OrgTree model={model} />)
+
+      await user.click(screen.getByRole('button', { name: 'Развернуть «Платформа»' }))
+
+      const group = screen.getByText('Core API').closest('[data-testid="collapse"]')!
+      expect(group).toHaveAttribute('data-state', 'opening')
     })
   })
 

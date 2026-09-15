@@ -1,6 +1,8 @@
 import { asClass, asValue, createContainer, InjectionMode, type AwilixContainer } from 'awilix';
 import type { AppConfig } from '@/config.js';
 import { OrgTreeController } from '@/controllers/org-tree.controller.js';
+import { OrgTreeChangeBus } from '@/events/org-tree-change-bus.js';
+import { LiveUpdatesGateway } from '@/gateways/live-updates.gateway.js';
 import { OrgNodeMapper } from '@/mappers/org-node.mapper.js';
 import type { OrgNode } from '@/models/org-node.model.js';
 import {
@@ -8,16 +10,23 @@ import {
   type OrgNodeRepository,
 } from '@/repositories/org-node.repository.js';
 import { orgNodesSeed } from '@/seeds/org-nodes.seed.js';
-import { OrgTreeService, type OrgTreeReader } from '@/services/org-tree.service.js';
+import { LiveUpdateSimulator } from '@/services/live-update-simulator.js';
+import { OrgTreeService, type OrgTreeServiceApi } from '@/services/org-tree.service.js';
 
 /** Everything the container can resolve. Names are the injection keys. */
 export interface Cradle {
   config: AppConfig;
   orgNodesSeed: readonly OrgNode[];
+  random: () => number;
+  /** Injectable clock keeps time-based live patches deterministic in tests. */
+  clock: () => Date;
   orgNodeRepository: OrgNodeRepository;
+  orgTreeChangeBus: OrgTreeChangeBus;
   orgNodeMapper: OrgNodeMapper;
-  orgTreeService: OrgTreeReader;
+  orgTreeService: OrgTreeServiceApi;
   orgTreeController: OrgTreeController;
+  liveUpdateSimulator: LiveUpdateSimulator;
+  liveUpdatesGateway: LiveUpdatesGateway;
 }
 
 export type AppContainer = AwilixContainer<Cradle>;
@@ -36,10 +45,19 @@ export function createAppContainer(config: AppConfig): AppContainer {
   container.register({
     config: asValue(config),
     orgNodesSeed: asValue(orgNodesSeed),
+    random: asValue(Math.random),
+    clock: asValue(() => new Date()),
     orgNodeRepository: asClass(InMemoryOrgNodeRepository).singleton(),
+    orgTreeChangeBus: asClass(OrgTreeChangeBus).singleton(),
     orgNodeMapper: asClass(OrgNodeMapper).singleton(),
     orgTreeService: asClass(OrgTreeService).singleton(),
     orgTreeController: asClass(OrgTreeController).singleton(),
+    liveUpdateSimulator: asClass(LiveUpdateSimulator)
+      .singleton()
+      .disposer((simulator) => simulator.stop()),
+    liveUpdatesGateway: asClass(LiveUpdatesGateway)
+      .singleton()
+      .disposer((gateway) => gateway.close()),
   });
 
   return container;
